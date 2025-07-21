@@ -22,7 +22,8 @@ pub type Account = TrieAccount;
 
 mod block;
 pub use block::{
-    Block, BlockBody, BlockHeader, EthBlock, GasLimitMismatch, Header, HeaderInfo, HeaderRoots,
+    Block, BlockBody, BlockHeader, BlockHeaderMut, EthBlock, GasLimitMismatch, Header, HeaderInfo,
+    HeaderRoots,
 };
 
 mod indexed;
