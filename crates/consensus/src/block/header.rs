@@ -837,6 +837,16 @@ pub trait BlockHeader {
     }
 }
 
+pub trait BlockHeaderMut: BlockHeader {
+    fn set_state_root(&mut self, _state_root: B256) {}
+}
+
+impl BlockHeaderMut for Header {
+    fn set_state_root(&mut self, state_root: B256) {
+        self.state_root = state_root;
+    }
+}
+
 impl BlockHeader for Header {
     fn parent_hash(&self) -> B256 {
         self.parent_hash

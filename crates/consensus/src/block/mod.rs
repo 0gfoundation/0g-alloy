@@ -1,7 +1,7 @@
 //! Block-related consensus types.
 
 mod header;
-pub use header::{BlockHeader, GasLimitMismatch, Header};
+pub use header::{BlockHeader, BlockHeaderMut, GasLimitMismatch, Header};
 
 mod traits;
 pub use traits::EthBlock;
