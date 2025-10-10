@@ -746,13 +746,43 @@ pub trait BlockHeader {
     }
 }
 
+/// Trait for mutable block header operations
 pub trait BlockHeaderMut: BlockHeader {
+    /// Sets the state root hash of the block
     fn set_state_root(&mut self, _state_root: B256) {}
+
+    /// Sets the gas used by the block
+    fn set_gas_used(&mut self, _gas_used: u64) {}
+
+    /// Sets the receipts root hash of the block
+    fn set_receipts_root(&mut self, _receipts_root: B256) {}
+
+    /// Sets the logs bloom filter of the block
+    fn set_logs_bloom(&mut self, _logs_bloom: Bloom) {}
+
+    /// Sets the requests hash of the block
+    fn set_requests_hash(&mut self, _requests_hash: Option<B256>) {}
 }
 
 impl BlockHeaderMut for Header {
     fn set_state_root(&mut self, state_root: B256) {
         self.state_root = state_root;
+    }
+
+    fn set_gas_used(&mut self, gas_used: u64) {
+        self.gas_used = gas_used;
+    }
+
+    fn set_receipts_root(&mut self, receipts_root: B256) {
+        self.receipts_root = receipts_root;
+    }
+
+    fn set_logs_bloom(&mut self, logs_bloom: Bloom) {
+        self.logs_bloom = logs_bloom;
+    }
+
+    fn set_requests_hash(&mut self, requests_hash: Option<B256>) {
+        self.requests_hash = requests_hash;
     }
 }
 
