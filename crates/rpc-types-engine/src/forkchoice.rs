@@ -308,12 +308,15 @@ mod tests {
     fn ssz_forkchoice_updated_roundtrip() {
         use ssz::{Decode, Encode};
 
+        // reth-v2.8.1 migration: SSZ fixture new in alloy 2.x; gets the 0G field, empty as SSZ does
+        // not carry it.
         let updated = ForkchoiceUpdated {
             payload_status: PayloadStatus {
                 status: PayloadStatusEnum::Invalid {
                     validation_error: "invalid block number".to_string(),
                 },
                 latest_valid_hash: Some(B256::with_last_byte(4)),
+                execution_requests: vec![],
             },
             payload_id: Some(PayloadId(alloy_primitives::B64::with_last_byte(5))),
         };

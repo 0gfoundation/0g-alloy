@@ -34,6 +34,8 @@ pub type ExecutionPayloadBodiesV1 = Vec<Option<ExecutionPayloadBodyV1>>;
 /// See also: <https://eips.ethereum.org/EIPS/eip-7928>
 pub type ExecutionPayloadBodiesV2 = Vec<Option<ExecutionPayloadBodyV2>>;
 
+use std::ops::Deref;
+
 /// And 8-byte identifier for an execution payload.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -3717,17 +3719,19 @@ pub struct PayloadStatus {
     pub status: PayloadStatusEnum,
     /// Hash of the most recent valid block in the branch defined by payload and its ancestors
     pub latest_valid_hash: Option<B256>,
+    /// execution requests
+    pub execution_requests: Vec<Bytes>,
 }
 
 impl PayloadStatus {
     /// Initializes a new payload status.
-    pub const fn new(status: PayloadStatusEnum, latest_valid_hash: Option<B256>) -> Self {
-        Self { status, latest_valid_hash }
+    pub const fn new(status: PayloadStatusEnum, latest_valid_hash: Option<B256>, execution_requests: Vec<Bytes>) -> Self {
+        Self { status, latest_valid_hash, execution_requests }
     }
 
     /// Creates a new payload status from the given status.
     pub const fn from_status(status: PayloadStatusEnum) -> Self {
-        Self { status, latest_valid_hash: None }
+        Self { status, latest_valid_hash: None, execution_requests: vec![] }
     }
 
     /// Sets the latest valid hash.
@@ -3810,7 +3814,10 @@ impl ssz::Decode for PayloadStatus {
         let status = PayloadStatusEnum::from_ssz_code(status_code, validation_error)?;
         let latest_valid_hash = (!latest_valid_hash.is_zero()).then_some(latest_valid_hash);
 
-        Ok(Self { status, latest_valid_hash })
+        // reth-v2.8.1 migration: the SSZ codec is new in alloy 2.x and its container has no slot
+        // for the 0G `execution_requests` field, so a decoded status carries none (SSZ is a known
+        // limitation of the 0G fields; JSON-RPC still serializes them).
+        Ok(Self { status, latest_valid_hash, execution_requests: Vec::new() })
     }
 }
 
@@ -3818,8 +3825,8 @@ impl core::fmt::Display for PayloadStatus {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(
             f,
-            "PayloadStatus {{ status: {}, latestValidHash: {:?} }}",
-            self.status, self.latest_valid_hash
+            "PayloadStatus {{ status: {}, latestValidHash: {:?}, requests: {} }}",
+            self.status, self.latest_valid_hash, self.execution_requests.len(), 
         )
     }
 }
@@ -3830,10 +3837,13 @@ impl serde::Serialize for PayloadStatus {
     where
         S: serde::Serializer,
     {
+        let requests = self.execution_requests.iter().map(Bytes::deref).collect::<Vec<_>>();
+
         use serde::ser::SerializeMap;
-        let mut map = serializer.serialize_map(Some(3))?;
+        let mut map = serializer.serialize_map(Some(4))?;
         map.serialize_entry("status", self.status.as_str())?;
         map.serialize_entry("latestValidHash", &self.latest_valid_hash)?;
+        map.serialize_entry("executionRequests", &requests)?;
         map.serialize_entry("validationError", &self.status.validation_error())?;
         map.end()
     }
@@ -4731,17 +4741,30 @@ mod tests {
     fn ssz_payload_status_roundtrip() {
         use ssz::{Decode, Encode};
 
+        // reth-v2.8.1 migration: these SSZ fixtures are new in alloy 2.x; they get the 0G
+        // `execution_requests` field (empty, since SSZ does not carry it), like the original test
+        // fixtures.
         let statuses = [
             PayloadStatus {
                 status: PayloadStatusEnum::Valid,
                 latest_valid_hash: Some(B256::with_last_byte(1)),
+                execution_requests: vec![],
             },
             PayloadStatus {
                 status: PayloadStatusEnum::Invalid { validation_error: "bad payload".to_string() },
                 latest_valid_hash: Some(B256::with_last_byte(2)),
+                execution_requests: vec![],
             },
-            PayloadStatus { status: PayloadStatusEnum::Syncing, latest_valid_hash: None },
-            PayloadStatus { status: PayloadStatusEnum::Accepted, latest_valid_hash: None },
+            PayloadStatus {
+                status: PayloadStatusEnum::Syncing,
+                latest_valid_hash: None,
+                execution_requests: vec![],
+            },
+            PayloadStatus {
+                status: PayloadStatusEnum::Accepted,
+                latest_valid_hash: None,
+                execution_requests: vec![],
+            },
         ];
 
         for status in statuses {
@@ -4755,9 +4778,12 @@ mod tests {
     fn ssz_payload_status_matches_eip8178_container() {
         use ssz::{Decode, Encode};
 
+        // reth-v2.8.1 migration: SSZ fixture new in alloy 2.x; gets the 0G field, empty as SSZ does
+        // not carry it.
         let status = PayloadStatus {
             status: PayloadStatusEnum::Invalid { validation_error: "bad payload".to_string() },
             latest_valid_hash: None,
+            execution_requests: vec![],
         };
         let spec = (1u8, B256::ZERO, b"bad payload".to_vec());
 
@@ -4798,6 +4824,7 @@ mod tests {
             status: PayloadStatusEnum::Invalid {
                 validation_error: "Failed to decode block".to_string(),
             },
+            execution_requests: vec![],
         };
         assert_eq!(q, serde_json::from_str(s).unwrap());
 
@@ -4807,6 +4834,7 @@ mod tests {
             status: PayloadStatusEnum::Invalid {
                 validation_error: PayloadValidationError::LinksToRejectedPayload.to_string(),
             },
+            execution_requests: vec![],
         };
         assert_eq!(q, serde_json::from_str(s).unwrap());
 
@@ -4816,6 +4844,7 @@ mod tests {
             status: PayloadStatusEnum::Invalid {
                 validation_error: PayloadValidationError::InvalidBlockNumber.to_string(),
             },
+            execution_requests: vec![],
         };
         assert_eq!(q, serde_json::from_str(s).unwrap());
 
@@ -4834,6 +4863,7 @@ mod tests {
                 }
                 .to_string(),
             },
+            execution_requests: vec![],
         };
         assert_eq!(q, serde_json::from_str(s).unwrap());
     }

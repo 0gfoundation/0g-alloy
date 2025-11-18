@@ -297,9 +297,12 @@ fn every_payload_status_roundtrips() {
         PayloadStatusEnum::Syncing,
         PayloadStatusEnum::Accepted,
     ] {
+        // reth-v2.8.1 migration: SSZ fixture new in alloy 2.x; gets the 0G field, empty as SSZ does
+        // not carry it.
         let value = PayloadStatus::try_from(LegacyPayloadStatus {
             status,
             latest_valid_hash: Some(B256::ZERO),
+            execution_requests: vec![],
         })
         .unwrap();
         assert_eq!(PayloadStatus::from_ssz_bytes(&value.as_ssz_bytes()).unwrap(), value);
@@ -338,9 +341,12 @@ fn payload_status_rejects_non_invalid_validation_error() {
 
 #[test]
 fn payload_status_legacy_conversion_rejects_oversized_error() {
+    // reth-v2.8.1 migration: SSZ fixture new in alloy 2.x; gets the 0G field, empty as SSZ does not
+    // carry it.
     assert!(PayloadStatus::try_from(LegacyPayloadStatus {
         status: PayloadStatusEnum::Invalid { validation_error: "x".repeat(1025) },
         latest_valid_hash: None,
+        execution_requests: vec![],
     })
     .is_err());
 }

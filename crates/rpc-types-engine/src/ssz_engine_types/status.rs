@@ -129,7 +129,13 @@ impl From<PayloadStatus> for LegacyPayloadStatus {
                     .unwrap_or_default(),
             },
         };
-        Self { status, latest_valid_hash: value.latest_valid_hash.into() }
+        // reth-v2.8.1 migration: the SSZ engine status (new in alloy 2.x) has no 0G
+        // `execution_requests` field, so the legacy status built from it carries none.
+        Self {
+            status,
+            latest_valid_hash: value.latest_valid_hash.into(),
+            execution_requests: Vec::new(),
+        }
     }
 }
 
