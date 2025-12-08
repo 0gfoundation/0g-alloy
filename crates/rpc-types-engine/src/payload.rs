@@ -26,6 +26,8 @@ use core::iter::{FromIterator, IntoIterator};
 /// The execution payload body response that allows for `null` values.
 pub type ExecutionPayloadBodiesV1 = Vec<Option<ExecutionPayloadBodyV1>>;
 
+use std::ops::Deref;
+
 /// And 8-byte identifier for an execution payload.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -1893,17 +1895,19 @@ pub struct PayloadStatus {
     pub status: PayloadStatusEnum,
     /// Hash of the most recent valid block in the branch defined by payload and its ancestors
     pub latest_valid_hash: Option<B256>,
+    /// execution requests
+    pub execution_requests: Vec<Bytes>,
 }
 
 impl PayloadStatus {
     /// Initializes a new payload status.
-    pub const fn new(status: PayloadStatusEnum, latest_valid_hash: Option<B256>) -> Self {
-        Self { status, latest_valid_hash }
+    pub const fn new(status: PayloadStatusEnum, latest_valid_hash: Option<B256>, execution_requests: Vec<Bytes>) -> Self {
+        Self { status, latest_valid_hash, execution_requests }
     }
 
     /// Creates a new payload status from the given status.
     pub const fn from_status(status: PayloadStatusEnum) -> Self {
-        Self { status, latest_valid_hash: None }
+        Self { status, latest_valid_hash: None, execution_requests: vec![] }
     }
 
     /// Sets the latest valid hash.
@@ -1938,8 +1942,8 @@ impl core::fmt::Display for PayloadStatus {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(
             f,
-            "PayloadStatus {{ status: {}, latestValidHash: {:?} }}",
-            self.status, self.latest_valid_hash
+            "PayloadStatus {{ status: {}, latestValidHash: {:?}, requests: {} }}",
+            self.status, self.latest_valid_hash, self.execution_requests.len(), 
         )
     }
 }
@@ -1950,10 +1954,13 @@ impl serde::Serialize for PayloadStatus {
     where
         S: serde::Serializer,
     {
+        let requests = self.execution_requests.iter().map(Bytes::deref).collect::<Vec<_>>();
+
         use serde::ser::SerializeMap;
-        let mut map = serializer.serialize_map(Some(3))?;
+        let mut map = serializer.serialize_map(Some(4))?;
         map.serialize_entry("status", self.status.as_str())?;
         map.serialize_entry("latestValidHash", &self.latest_valid_hash)?;
+        map.serialize_entry("executionRequests", &requests)?;
         map.serialize_entry("validationError", &self.status.validation_error())?;
         map.end()
     }
@@ -2340,6 +2347,7 @@ mod tests {
             status: PayloadStatusEnum::Invalid {
                 validation_error: "Failed to decode block".to_string(),
             },
+            execution_requests: vec![],
         };
         assert_eq!(q, serde_json::from_str(s).unwrap());
 
@@ -2349,6 +2357,7 @@ mod tests {
             status: PayloadStatusEnum::Invalid {
                 validation_error: PayloadValidationError::LinksToRejectedPayload.to_string(),
             },
+            execution_requests: vec![],
         };
         assert_eq!(q, serde_json::from_str(s).unwrap());
 
@@ -2358,6 +2367,7 @@ mod tests {
             status: PayloadStatusEnum::Invalid {
                 validation_error: PayloadValidationError::InvalidBlockNumber.to_string(),
             },
+            execution_requests: vec![],
         };
         assert_eq!(q, serde_json::from_str(s).unwrap());
 
@@ -2376,6 +2386,7 @@ mod tests {
                 }
                 .to_string(),
             },
+            execution_requests: vec![],
         };
         assert_eq!(q, serde_json::from_str(s).unwrap());
     }
