@@ -97,6 +97,7 @@ impl<T, H> Block<T, H> {
                 transactions: self.body.transactions.into_iter().map(f).collect(),
                 ommers: self.body.ommers,
                 withdrawals: self.body.withdrawals,
+                slashed: self.body.slashed,
             },
         }
     }
@@ -119,6 +120,7 @@ impl<T, H> Block<T, H> {
                     .collect::<Result<_, _>>()?,
                 ommers: self.body.ommers,
                 withdrawals: self.body.withdrawals,
+                slashed: self.body.slashed,
             },
         })
     }
@@ -220,11 +222,13 @@ pub struct BlockBody<T, H = Header> {
     pub ommers: Vec<H>,
     /// Block withdrawals.
     pub withdrawals: Option<Withdrawals>,
+    /// Slashed validator entries (0G extension, not part of the block hash).
+    pub slashed: Option<Withdrawals>,
 }
 
 impl<T, H> Default for BlockBody<T, H> {
     fn default() -> Self {
-        Self { transactions: Vec::new(), ommers: Vec::new(), withdrawals: None }
+        Self { transactions: Vec::new(), ommers: Vec::new(), withdrawals: None, slashed: None }
     }
 }
 
@@ -268,6 +272,7 @@ impl<T, H> BlockBody<T, H> {
             transactions: self.transactions,
             ommers: self.ommers.into_iter().map(f).collect(),
             withdrawals: self.withdrawals,
+            slashed: self.slashed,
         }
     }
 
@@ -280,6 +285,7 @@ impl<T, H> BlockBody<T, H> {
             transactions: self.transactions,
             ommers: self.ommers.into_iter().map(f).collect::<Result<Vec<_>, _>>()?,
             withdrawals: self.withdrawals,
+            slashed: self.slashed,
         })
     }
 }
@@ -324,6 +330,7 @@ mod block_rlp {
         transactions: Vec<T>,
         ommers: Vec<H>,
         withdrawals: Option<Withdrawals>,
+        slashed: Option<Withdrawals>,
     }
 
     #[derive(RlpEncodable)]
@@ -333,6 +340,7 @@ mod block_rlp {
         pub(crate) transactions: &'a Vec<T>,
         pub(crate) ommers: &'a Vec<H>,
         pub(crate) withdrawals: Option<&'a Withdrawals>,
+        pub(crate) slashed: Option<&'a Withdrawals>,
     }
 
     impl<'a, T, H> HelperRef<'a, T, H> {
@@ -342,14 +350,22 @@ mod block_rlp {
                 transactions: &body.transactions,
                 ommers: &body.ommers,
                 withdrawals: body.withdrawals.as_ref(),
+                slashed: body.slashed.as_ref(),
             }
         }
     }
 
     impl<'a, T, H> From<&'a Block<T, H>> for HelperRef<'a, T, H> {
         fn from(block: &'a Block<T, H>) -> Self {
-            let Block { header, body: BlockBody { transactions, ommers, withdrawals } } = block;
-            Self { header, transactions, ommers, withdrawals: withdrawals.as_ref() }
+            let Block { header, body: BlockBody { transactions, ommers, withdrawals, slashed } } =
+                block;
+            Self {
+                header,
+                transactions,
+                ommers,
+                withdrawals: withdrawals.as_ref(),
+                slashed: slashed.as_ref(),
+            }
         }
     }
 
@@ -367,8 +383,8 @@ mod block_rlp {
 
     impl<T: Decodable, H: Decodable> Decodable for Block<T, H> {
         fn decode(b: &mut &[u8]) -> alloy_rlp::Result<Self> {
-            let Helper { header, transactions, ommers, withdrawals } = Helper::decode(b)?;
-            Ok(Self { header, body: BlockBody { transactions, ommers, withdrawals } })
+            let Helper { header, transactions, ommers, withdrawals, slashed } = Helper::decode(b)?;
+            Ok(Self { header, body: BlockBody { transactions, ommers, withdrawals, slashed } })
         }
     }
 }
@@ -390,7 +406,7 @@ where
             .map(|_| H::arbitrary(u))
             .collect::<arbitrary::Result<Vec<_>>>()?;
 
-        Ok(Self { transactions, ommers, withdrawals: u.arbitrary()? })
+        Ok(Self { transactions, ommers, withdrawals: u.arbitrary()?, slashed: u.arbitrary()? })
     }
 }
 
@@ -398,10 +414,34 @@ where
 mod tests {
     use super::*;
     use crate::{Signed, TxEnvelope, TxLegacy};
+    use alloy_eips::eip4895::{Withdrawal, Withdrawals};
+    use alloy_primitives::address;
+    use alloy_rlp::{Decodable, Encodable};
 
     #[test]
     fn can_convert_block() {
         let block: Block<Signed<TxLegacy>> = Block::default();
         let _: Block<TxEnvelope> = block.convert_transactions();
+    }
+
+    #[test]
+    fn block_body_slashed_rlp_roundtrip() {
+        let body = BlockBody::<TxEnvelope, Header> {
+            transactions: vec![],
+            ommers: vec![],
+            withdrawals: Some(Withdrawals::default()),
+            slashed: Some(Withdrawals::new(vec![Withdrawal {
+                index: 0,
+                validator_index: 42,
+                address: address!("0000000000000000000000000000000000000001"),
+                amount: 1_000_000_000,
+            }])),
+        };
+
+        let mut encoded = Vec::new();
+        body.encode(&mut encoded);
+
+        let decoded = BlockBody::<TxEnvelope, Header>::decode(&mut encoded.as_slice()).unwrap();
+        assert_eq!(body, decoded);
     }
 }

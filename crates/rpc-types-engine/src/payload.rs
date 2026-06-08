@@ -31,7 +31,7 @@ pub type SlashedValidatorEntry = Withdrawal;
 /// The execution payload body response that allows for `null` values.
 pub type ExecutionPayloadBodiesV1 = Vec<Option<ExecutionPayloadBodyV1>>;
 
-use std::ops::Deref;
+use core::ops::Deref;
 
 /// And 8-byte identifier for an execution payload.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
@@ -385,7 +385,7 @@ impl ExecutionPayloadV1 {
 
         Ok(Block {
             header,
-            body: BlockBody { transactions: self.transactions, ommers: vec![], withdrawals: None },
+            body: BlockBody { transactions: self.transactions, ommers: vec![], withdrawals: None, slashed: None },
         })
     }
 
@@ -709,7 +709,12 @@ impl ExecutionPayloadV3 {
         Self {
             blob_gas_used: block.blob_gas_used().unwrap_or_default(),
             excess_blob_gas: block.excess_blob_gas().unwrap_or_default(),
-            slashed: Vec::new(),
+            slashed: block
+                .body
+                .slashed
+                .clone()
+                .map(Withdrawals::into_inner)
+                .unwrap_or_default(),
             payload_inner: ExecutionPayloadV2::from_block_unchecked(block_hash, block),
         }
     }
@@ -763,6 +768,9 @@ impl ExecutionPayloadV3 {
 
         base_block.header.blob_gas_used = Some(self.blob_gas_used);
         base_block.header.excess_blob_gas = Some(self.excess_blob_gas);
+        if !self.slashed.is_empty() {
+            base_block.body.slashed = Some(self.slashed.into());
+        }
 
         Ok(base_block)
     }
