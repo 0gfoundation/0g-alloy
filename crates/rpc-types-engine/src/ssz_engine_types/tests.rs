@@ -27,7 +27,14 @@ fn payload_v2() -> ExecutionPayloadV2 {
 }
 
 fn payload_v3() -> ExecutionPayloadV3 {
-    ExecutionPayloadV3 { payload_inner: payload_v2(), blob_gas_used: 17, excess_blob_gas: 18 }
+    // reth-v2.8.1 migration: fixture new in alloy 2.x; gets the 0G `slashed` field, empty as SSZ
+    // does not carry it.
+    ExecutionPayloadV3 {
+        payload_inner: payload_v2(),
+        blob_gas_used: 17,
+        excess_blob_gas: 18,
+        slashed: Vec::new(),
+    }
 }
 
 fn payload_v4() -> ExecutionPayloadV4 {

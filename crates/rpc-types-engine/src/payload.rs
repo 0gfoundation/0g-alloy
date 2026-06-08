@@ -26,6 +26,11 @@ use alloy_eips::{
 use alloy_primitives::{keccak256, Address, Bloom, Bytes, Sealable, Sealed, B256, B64, U256};
 use core::iter::{FromIterator, IntoIterator};
 
+/// A slashed validator entry in an execution payload.
+///
+/// Alias of [`Withdrawal`] with the same JSON encoding (`validatorIndex`, `amount`, `address`).
+pub type SlashedValidatorEntry = Withdrawal;
+
 /// The execution payload body response that allows for `null` values.
 pub type ExecutionPayloadBodiesV1 = Vec<Option<ExecutionPayloadBodyV1>>;
 
@@ -1232,6 +1237,10 @@ pub struct ExecutionPayloadV3 {
     /// See <https://github.com/ethereum/execution-apis/blob/fe8e13c288c592ec154ce25c534e26cb7ce0530d/src/engine/cancun.md#ExecutionPayloadV3>
     #[cfg_attr(feature = "serde", serde(with = "alloy_serde::quantity"))]
     pub excess_blob_gas: u64,
+
+    /// Slashed validator entries (0G extension, same encoding as [`Withdrawal`]).
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Vec::is_empty"))]
+    pub slashed: Vec<SlashedValidatorEntry>,
 }
 
 #[cfg(feature = "serde")]
@@ -1266,6 +1275,10 @@ impl<'de> serde::Deserialize<'de> for ExecutionPayloadV3 {
             blob_gas_used: u64,
             #[serde(with = "alloy_serde::quantity")]
             excess_blob_gas: u64,
+            // reth-v2.8.1 migration: alloy 2.x replaced the derived Deserialize (where the 0G field's
+            // `serde(default)` applied) with this helper, so `slashed` is added here to keep reading it.
+            #[serde(default)]
+            slashed: Vec<SlashedValidatorEntry>,
         }
 
         let helper = Helper::deserialize(deserializer)?;
@@ -1291,6 +1304,7 @@ impl<'de> serde::Deserialize<'de> for ExecutionPayloadV3 {
             },
             blob_gas_used: helper.blob_gas_used,
             excess_blob_gas: helper.excess_blob_gas,
+            slashed: helper.slashed,
         })
     }
 }
@@ -1320,6 +1334,7 @@ impl ExecutionPayloadV3 {
         Self {
             blob_gas_used: block.blob_gas_used().unwrap_or_default(),
             excess_blob_gas: block.excess_blob_gas().unwrap_or_default(),
+            slashed: Vec::new(),
             payload_inner: ExecutionPayloadV2::from_block_unchecked(block_hash, block),
         }
     }
@@ -1327,6 +1342,11 @@ impl ExecutionPayloadV3 {
     /// Returns the withdrawals for the payload.
     pub const fn withdrawals(&self) -> &Vec<Withdrawal> {
         &self.payload_inner.withdrawals
+    }
+
+    /// Returns slashed validator entries for the payload.
+    pub fn slashed(&self) -> &[SlashedValidatorEntry] {
+        &self.slashed
     }
 
     /// Returns the timestamp for the payload.
@@ -1455,6 +1475,7 @@ impl ssz::Decode for ExecutionPayloadV3 {
             },
             blob_gas_used: decoder.decode_next()?,
             excess_blob_gas: decoder.decode_next()?,
+            slashed: Vec::new(),
         })
     }
 }
@@ -1566,6 +1587,10 @@ impl<'de> serde::Deserialize<'de> for ExecutionPayloadV4 {
             block_access_list: Bytes,
             #[serde(with = "alloy_serde::quantity")]
             slot_number: u64,
+            // reth-v2.8.1 migration: V4 is new in alloy 2.x and serializes its flattened V3 part,
+            // including the 0G `slashed` field; read it back here so a V4 payload round-trips like V3.
+            #[serde(default)]
+            slashed: Vec<SlashedValidatorEntry>,
         }
 
         let helper = Helper::deserialize(deserializer)?;
@@ -1592,6 +1617,7 @@ impl<'de> serde::Deserialize<'de> for ExecutionPayloadV4 {
                 },
                 blob_gas_used: helper.blob_gas_used,
                 excess_blob_gas: helper.excess_blob_gas,
+                slashed: helper.slashed,
             },
             block_access_list: helper.block_access_list,
             slot_number: helper.slot_number,
@@ -1653,6 +1679,9 @@ impl ssz::Decode for ExecutionPayloadV4 {
                 },
                 blob_gas_used: decoder.decode_next()?,
                 excess_blob_gas: decoder.decode_next()?,
+                // reth-v2.8.1 migration: V4 SSZ decoding is new in alloy 2.x; like the original V3
+                // SSZ decoder, it has no slot for the 0G `slashed` field.
+                slashed: Vec::new(),
             },
             block_access_list: decoder.decode_next()?,
             slot_number: decoder.decode_next()?,
@@ -2719,6 +2748,11 @@ impl ExecutionPayload {
         }
     }
 
+    /// Returns slashed validator entries for the payload, if present (V3+).
+    pub fn slashed(&self) -> Option<&[SlashedValidatorEntry]> {
+        self.as_v3().map(ExecutionPayloadV3::slashed)
+    }
+
     /// Returns the transactions for the payload.
     pub const fn transactions(&self) -> &Vec<Bytes> {
         &self.as_v1().transactions
@@ -3133,6 +3167,7 @@ impl<'de> serde::Deserialize<'de> for ExecutionPayload {
                     Transactions,
                     // V2
                     Withdrawals,
+                    Slashed,
                     // V3
                     BlobGasUsed,
                     ExcessBlobGas,
@@ -3156,6 +3191,7 @@ impl<'de> serde::Deserialize<'de> for ExecutionPayload {
                 let mut block_hash = None;
                 let mut transactions = None;
                 let mut withdrawals = None;
+                let mut slashed = None;
                 let mut blob_gas_used = None;
                 let mut excess_blob_gas = None;
                 let mut block_access_list = None;
@@ -3190,6 +3226,7 @@ impl<'de> serde::Deserialize<'de> for ExecutionPayload {
                         Fields::BlockHash => block_hash = Some(map.next_value()?),
                         Fields::Transactions => transactions = Some(map.next_value()?),
                         Fields::Withdrawals => withdrawals = Some(map.next_value()?),
+                        Fields::Slashed => slashed = Some(map.next_value()?),
                         Fields::BlobGasUsed => {
                             let raw = map.next_value::<U64>()?;
                             blob_gas_used = Some(raw.to());
@@ -3269,6 +3306,7 @@ impl<'de> serde::Deserialize<'de> for ExecutionPayload {
                         payload_inner: ExecutionPayloadV2 { payload_inner: v1, withdrawals },
                         blob_gas_used,
                         excess_blob_gas,
+                        slashed: slashed.unwrap_or_default(),
                     };
 
                     // Check for V4 fields (block_access_list and slot_number)
@@ -3296,6 +3334,12 @@ impl<'de> serde::Deserialize<'de> for ExecutionPayload {
                     return Err(serde::de::Error::custom("invalid enum variant"));
                 }
 
+                if slashed.is_some() {
+                    return Err(serde::de::Error::custom(
+                        "slashed field is only valid for V3 payloads",
+                    ));
+                }
+
                 Ok(ExecutionPayload::V2(ExecutionPayloadV2 { payload_inner: v1, withdrawals }))
             }
         }
@@ -3316,6 +3360,7 @@ impl<'de> serde::Deserialize<'de> for ExecutionPayload {
             "blockHash",
             "transactions",
             "withdrawals",
+            "slashed",
             "blobGasUsed",
             "excessBlobGas",
             "blockAccessList",
@@ -4426,10 +4471,13 @@ mod tests {
 
     #[cfg(feature = "ssz")]
     fn ssz_payload_v3() -> ExecutionPayloadV3 {
+        // reth-v2.8.1 migration: fixture new in alloy 2.x; gets the 0G `slashed` field, empty as
+        // SSZ does not carry it.
         ExecutionPayloadV3 {
             payload_inner: ssz_payload_v2(),
             blob_gas_used: 16,
             excess_blob_gas: 17,
+            slashed: Vec::new(),
         }
     }
 
@@ -5140,6 +5188,59 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "serde")]
+    fn deserialize_execution_payload_with_slashed() {
+        use alloy_eips::eip4895::Withdrawal;
+        use alloy_primitives::address;
+
+        let response = r#"
+{
+  "parentHash": "0xfe34aaa2b869c66a727783ee5ad3e3983b6ef22baf24a1e502add94e7bcac67a",
+  "feeRecipient": "0x0000000000000000000000000000000000000000",
+  "stateRoot": "0xde3b357f5f099e4c33d0343c9e9d204d663d7bd9c65020a38e5d0b2a9ace78a2",
+  "receiptsRoot": "0x6a5c41dc55a1bd3e74e7f6accc799efb08b00c36c15265058433fcea6323e95f",
+  "logsBloom": "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+  "prevRandao": "0x74132c32fe3ab9a470a8352544514d21b6969e7749f97742b53c18a1b22b396c",
+  "blockNumber": "0xb",
+  "gasLimit": "0x405829",
+  "gasUsed": "0x3f0ca0",
+  "timestamp": "0x6507d6b4",
+  "extraData": "0xd883010d01846765746888676f312e32302e33856c696e7578",
+  "baseFeePerGas": "0x173b30b3",
+  "blockHash": "0x99d486755fd046ad0bbb60457bac93d4856aa42fa00629cc7e4a28b65b5f8164",
+  "transactions": [],
+  "withdrawals": [],
+  "blobGasUsed": "0x0",
+  "excessBlobGas": "0x0",
+  "slashed": [
+    {
+      "index": "0x1",
+      "validatorIndex": "0x1",
+      "address": "0x0000000000000000000000000000000000000001",
+      "amount": "0x2"
+    }
+  ]
+}
+        "#;
+
+        let payload: ExecutionPayload = serde_json::from_str(response).unwrap();
+        let slashed = payload.slashed().expect("V3 payload should expose slashed");
+        assert_eq!(
+            slashed,
+            &[Withdrawal {
+                index: 1,
+                validator_index: 1,
+                address: address!("0000000000000000000000000000000000000001"),
+                amount: 2,
+            }]
+        );
+
+        let serialized = serde_json::to_string(&payload).unwrap();
+        let roundtrip: ExecutionPayload = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(roundtrip.slashed(), payload.slashed());
+    }
+
+    #[test]
     fn roundtrip_payload_to_block() {
         let first_transaction_raw = Bytes::from_static(&hex!("02f9017a8501a1f0ff438211cc85012a05f2008512a05f2000830249f094d5409474fd5a725eab2ac9a8b26ca6fb51af37ef80b901040cc7326300000000000000000000000000000000000000000000000000000000000000a000000000000000000000000000000000000000000000001bdd2ed4b616c800000000000000000000000000001e9ee781dd4b97bdef92e5d1785f73a1f931daa20000000000000000000000007a40026a3b9a41754a95eec8c92c6b99886f440c000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000020000000000000000000000009ae80eb647dd09968488fa1d7e412bf8558a0b7a0000000000000000000000000f9815537d361cb02befd9918c95c97d4d8a4a2bc001a0ba8f1928bb0efc3fcd01524a2039a9a2588fa567cd9a7cc18217e05c615e9d69a0544bfd11425ac7748e76b3795b57a5563e2b0eff47b5428744c62ff19ccfc305")[..]);
         let second_transaction_raw = Bytes::from_static(&hex!("03f901388501a1f0ff430c843b9aca00843b9aca0082520894e7249813d8ccf6fa95a2203f46a64166073d58878080c005f8c6a00195f6dff17753fc89b60eac6477026a805116962c9e412de8015c0484e661c1a001aae314061d4f5bbf158f15d9417a238f9589783f58762cd39d05966b3ba2fba0013f5be9b12e7da06f0dd11a7bdc4e0db8ef33832acc23b183bd0a2c1408a757a0019d9ac55ea1a615d92965e04d960cb3be7bff121a381424f1f22865bd582e09a001def04412e76df26fefe7b0ed5e10580918ae4f355b074c0cfe5d0259157869a0011c11a415db57e43db07aef0de9280b591d65ca0cce36c7002507f8191e5d4a80a0c89b59970b119187d97ad70539f1624bbede92648e2dc007890f9658a88756c5a06fb2e3d4ce2c438c0856c2de34948b7032b1aadc4642a9666228ea8cdc7786b7")[..]);
@@ -5166,6 +5267,7 @@ mod tests {
             },
             blob_gas_used: 0xc0000,
             excess_blob_gas: 0x580000,
+            slashed: vec![],
         };
 
         let mut block: Block<TxEnvelope> = new_payload.clone().try_into_block().unwrap();
@@ -5209,6 +5311,7 @@ mod tests {
             },
             blob_gas_used: 0xc0000,
             excess_blob_gas: 0x580000,
+            slashed: vec![],
         };
 
         let _block = new_payload
@@ -5827,6 +5930,9 @@ mod tests {
                 },
                 blob_gas_used: 0,
                 excess_blob_gas: 0,
+                // reth-v2.8.1 migration: fixture new in alloy 2.x; gets the 0G `slashed` field
+                // (empty).
+                slashed: vec![],
             },
             block_access_list: Bytes::from(vec![0xaa, 0xbb]),
             slot_number: 0,
@@ -5956,6 +6062,9 @@ mod tests {
                 },
                 blob_gas_used: 0,
                 excess_blob_gas: 0,
+                // reth-v2.8.1 migration: fixture new in alloy 2.x; gets the 0G `slashed` field
+                // (empty).
+                slashed: vec![],
             },
             block_access_list: block_access_list.clone(),
             slot_number: 7,
@@ -6048,6 +6157,9 @@ mod tests {
                     },
                     blob_gas_used: 0,
                     excess_blob_gas: 0,
+                    // reth-v2.8.1 migration: fixture new in alloy 2.x; gets the 0G `slashed` field
+                    // (empty).
+                    slashed: vec![],
                 },
                 block_value: U256::from(1u64),
                 blobs_bundle: BlobsBundleV1::empty(),
@@ -6089,6 +6201,8 @@ mod tests {
             },
             blob_gas_used: 0,
             excess_blob_gas: 0,
+            // reth-v2.8.1 migration: fixture new in alloy 2.x; gets the 0G `slashed` field (empty).
+            slashed: vec![],
         };
 
         let serialized = serde_json::to_string(&payload).unwrap();
