@@ -402,9 +402,16 @@ struct BeaconExecutionPayloadV3<'a> {
     #[serde_as(as = "DisplayFromStr")]
     excess_blob_gas: u64,
     /// Slashed validator entries (0G extension, same encoding as withdrawals).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, deserialize_with = "null_as_default_vec", skip_serializing_if = "Vec::is_empty")]
     #[serde_as(as = "Vec<BeaconWithdrawal>")]
     slashed: Vec<Withdrawal>,
+}
+
+fn null_as_default_vec<'de, D>(deserializer: D) -> Result<Vec<Withdrawal>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<Vec<Withdrawal>>::deserialize(deserializer).map(|v| v.unwrap_or_default())
 }
 
 impl<'a> From<BeaconExecutionPayloadV3<'a>> for ExecutionPayloadV3 {
