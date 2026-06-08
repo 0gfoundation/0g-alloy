@@ -15,7 +15,7 @@ use alloy_rpc_types_engine::{
     ExecutionPayload, ExecutionPayloadV1, ExecutionPayloadV2, ExecutionPayloadV3,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use serde_with::{serde_as, DeserializeAs, DisplayFromStr, SerializeAs};
+use serde_with::{serde_as, DefaultOnNull, DeserializeAs, DisplayFromStr, SerializeAs};
 use std::borrow::Cow;
 
 /// Response object of GET `/eth/v1/builder/header/{slot}/{parent_hash}/{pubkey}`
@@ -343,16 +343,10 @@ struct BeaconExecutionPayloadV3<'a> {
     #[serde_as(as = "DisplayFromStr")]
     excess_blob_gas: u64,
     /// Slashed validator entries (0G extension, same encoding as withdrawals).
-    #[serde(default, deserialize_with = "null_as_default_vec", skip_serializing_if = "Vec::is_empty")]
-    #[serde_as(as = "Vec<BeaconWithdrawal>")]
+    #[serde(default)]
+    #[serde_as(as = "DefaultOnNull<Vec<BeaconWithdrawal>>")]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     slashed: Vec<Withdrawal>,
-}
-
-fn null_as_default_vec<'de, D>(deserializer: D) -> Result<Vec<Withdrawal>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    Option::<Vec<Withdrawal>>::deserialize(deserializer).map(|v| v.unwrap_or_default())
 }
 
 impl<'a> From<BeaconExecutionPayloadV3<'a>> for ExecutionPayloadV3 {
