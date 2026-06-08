@@ -342,22 +342,28 @@ struct BeaconExecutionPayloadV3<'a> {
     blob_gas_used: u64,
     #[serde_as(as = "DisplayFromStr")]
     excess_blob_gas: u64,
+    /// Slashed validator entries (0G extension, same encoding as withdrawals).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde_as(as = "Vec<BeaconWithdrawal>")]
+    slashed: Vec<Withdrawal>,
 }
 
 impl<'a> From<BeaconExecutionPayloadV3<'a>> for ExecutionPayloadV3 {
     fn from(payload: BeaconExecutionPayloadV3<'a>) -> Self {
-        let BeaconExecutionPayloadV3 { payload_inner, blob_gas_used, excess_blob_gas } = payload;
-        Self { payload_inner: payload_inner.into(), blob_gas_used, excess_blob_gas }
+        let BeaconExecutionPayloadV3 { payload_inner, blob_gas_used, excess_blob_gas, slashed } =
+            payload;
+        Self { payload_inner: payload_inner.into(), blob_gas_used, excess_blob_gas, slashed }
     }
 }
 
 impl<'a> From<&'a ExecutionPayloadV3> for BeaconExecutionPayloadV3<'a> {
     fn from(value: &'a ExecutionPayloadV3) -> Self {
-        let ExecutionPayloadV3 { payload_inner, blob_gas_used, excess_blob_gas } = value;
+        let ExecutionPayloadV3 { payload_inner, blob_gas_used, excess_blob_gas, slashed } = value;
         BeaconExecutionPayloadV3 {
             payload_inner: payload_inner.into(),
             blob_gas_used: *blob_gas_used,
             excess_blob_gas: *excess_blob_gas,
+            slashed: slashed.clone(),
         }
     }
 }
@@ -623,6 +629,45 @@ mod tests {
                 assert_eq!(v3.payload_inner.payload_inner.gas_used, 1500);
                 assert_eq!(v3.blob_gas_used, 131072);
                 assert_eq!(v3.excess_blob_gas, 262144);
+            }
+            _ => panic!("Expected V3 payload"),
+        }
+
+        // Test V3 payload with slashed validator entries (0G extension)
+        let v3_payload_with_slashed_str = r#"{
+            "parent_hash": "0xcf8e0d4e9587369b2301d0790347320302cc0943d5a1884560367e8208d920f2",
+            "fee_recipient": "0xabcf8e0d4e9587369b2301d0790347320302cc09",
+            "state_root": "0xcf8e0d4e9587369b2301d0790347320302cc0943d5a1884560367e8208d920f2",
+            "receipts_root": "0xcf8e0d4e9587369b2301d0790347320302cc0943d5a1884560367e8208d920f2",
+            "logs_bloom": "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+            "prev_randao": "0xcf8e0d4e9587369b2301d0790347320302cc0943d5a1884560367e8208d920f2",
+            "block_number": "3",
+            "gas_limit": "3000",
+            "gas_used": "1500",
+            "timestamp": "1234567892",
+            "extra_data": "0x",
+            "base_fee_per_gas": "3000000000",
+            "block_hash": "0xcf8e0d4e9587369b2301d0790347320302cc0943d5a1884560367e8208d920f2",
+            "transactions": [],
+            "withdrawals": [],
+            "blob_gas_used": "131072",
+            "excess_blob_gas": "262144",
+            "slashed": [
+                {
+                    "index": "1",
+                    "validator_index": "1",
+                    "address": "0x0000000000000000000000000000000000000001",
+                    "amount": "2"
+                }
+            ]
+        }"#;
+
+        let payload = execution_payload_from_beacon_str(v3_payload_with_slashed_str).unwrap();
+        match payload {
+            ExecutionPayload::V3(v3) => {
+                assert_eq!(v3.slashed().len(), 1);
+                assert_eq!(v3.slashed()[0].validator_index, 1);
+                assert_eq!(v3.slashed()[0].amount, 2);
             }
             _ => panic!("Expected V3 payload"),
         }
