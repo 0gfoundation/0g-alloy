@@ -1210,7 +1210,10 @@ pub struct ExecutionPayloadV3 {
     pub excess_blob_gas: u64,
 
     /// Slashed validator entries (0G extension, same encoding as [`Withdrawal`]).
-    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Vec::is_empty"))]
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, deserialize_with = "alloy_serde::null_as_default", skip_serializing_if = "Vec::is_empty")
+    )]
     pub slashed: Vec<SlashedValidatorEntry>,
 }
 
@@ -3178,7 +3181,12 @@ impl<'de> serde::Deserialize<'de> for ExecutionPayload {
                         Fields::BlockHash => block_hash = Some(map.next_value()?),
                         Fields::Transactions => transactions = Some(map.next_value()?),
                         Fields::Withdrawals => withdrawals = Some(map.next_value()?),
-                        Fields::Slashed => slashed = Some(map.next_value()?),
+                        Fields::Slashed => {
+                            slashed = Some(
+                                map.next_value::<Option<Vec<SlashedValidatorEntry>>>()?
+                                    .unwrap_or_default(),
+                            );
+                        }
                         Fields::BlobGasUsed => {
                             let raw = map.next_value::<U64>()?;
                             blob_gas_used = Some(raw.to());
@@ -5019,6 +5027,71 @@ mod tests {
         let serialized = serde_json::to_string(&payload).unwrap();
         let roundtrip: ExecutionPayload = serde_json::from_str(&serialized).unwrap();
         assert_eq!(roundtrip.slashed(), payload.slashed());
+    }
+
+    #[test]
+    #[cfg(feature = "serde")]
+    fn deserialize_execution_payload_v3_without_slashed() {
+        let response = r#"
+{
+  "parentHash": "0xfe34aaa2b869c66a727783ee5ad3e3983b6ef22baf24a1e502add94e7bcac67a",
+  "feeRecipient": "0x0000000000000000000000000000000000000000",
+  "stateRoot": "0xde3b357f5f099e4c33d0343c9e9d204d663d7bd9c65020a38e5d0b2a9ace78a2",
+  "receiptsRoot": "0x6a5c41dc55a1bd3e74e7f6accc799efb08b00c36c15265058433fcea6323e95f",
+  "logsBloom": "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+  "prevRandao": "0x74132c32fe3ab9a470a8352544514d21b6969e7749f97742b53c18a1b22b396c",
+  "blockNumber": "0xb",
+  "gasLimit": "0x405829",
+  "gasUsed": "0x3f0ca0",
+  "timestamp": "0x6507d6b4",
+  "extraData": "0xd883010d01846765746888676f312e32302e33856c696e7578",
+  "baseFeePerGas": "0x173b30b3",
+  "blockHash": "0x99d486755fd046ad0bbb60457bac93d4856aa42fa00629cc7e4a28b65b5f8164",
+  "transactions": [],
+  "withdrawals": [],
+  "blobGasUsed": "0x0",
+  "excessBlobGas": "0x0"
+}
+        "#;
+
+        let payload_v3: ExecutionPayloadV3 = serde_json::from_str(response).unwrap();
+        assert!(payload_v3.slashed.is_empty());
+
+        let payload: ExecutionPayload = serde_json::from_str(response).unwrap();
+        assert_eq!(payload.slashed(), Some(&[][..]));
+    }
+
+    #[test]
+    #[cfg(feature = "serde")]
+    fn deserialize_execution_payload_v3_with_null_slashed() {
+        let response = r#"
+{
+  "parentHash": "0xfe34aaa2b869c66a727783ee5ad3e3983b6ef22baf24a1e502add94e7bcac67a",
+  "feeRecipient": "0x0000000000000000000000000000000000000000",
+  "stateRoot": "0xde3b357f5f099e4c33d0343c9e9d204d663d7bd9c65020a38e5d0b2a9ace78a2",
+  "receiptsRoot": "0x6a5c41dc55a1bd3e74e7f6accc799efb08b00c36c15265058433fcea6323e95f",
+  "logsBloom": "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+  "prevRandao": "0x74132c32fe3ab9a470a8352544514d21b6969e7749f97742b53c18a1b22b396c",
+  "blockNumber": "0xb",
+  "gasLimit": "0x405829",
+  "gasUsed": "0x3f0ca0",
+  "timestamp": "0x6507d6b4",
+  "extraData": "0xd883010d01846765746888676f312e32302e33856c696e7578",
+  "baseFeePerGas": "0x173b30b3",
+  "blockHash": "0x99d486755fd046ad0bbb60457bac93d4856aa42fa00629cc7e4a28b65b5f8164",
+  "transactions": [],
+  "withdrawals": [],
+  "blobGasUsed": "0x0",
+  "excessBlobGas": "0x0",
+  "slashed": null
+}
+        "#;
+
+        let payload_v3: ExecutionPayloadV3 = serde_json::from_str(response).unwrap();
+        assert!(payload_v3.slashed.is_empty());
+
+        let payload: ExecutionPayload = serde_json::from_str(response).unwrap();
+        assert_eq!(payload.slashed(), Some(&[][..]));
     }
 
     #[test]
