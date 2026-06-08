@@ -98,6 +98,7 @@ impl<T, H> Block<T, H> {
                 transactions: self.body.transactions.into_iter().map(f).collect(),
                 ommers: self.body.ommers,
                 withdrawals: self.body.withdrawals,
+                slashed: self.body.slashed,
             },
         }
     }
@@ -120,6 +121,7 @@ impl<T, H> Block<T, H> {
                     .collect::<Result<_, _>>()?,
                 ommers: self.body.ommers,
                 withdrawals: self.body.withdrawals,
+                slashed: self.body.slashed,
             },
         })
     }
@@ -197,7 +199,12 @@ impl<T: Encodable2718> Block<T, Header> {
         let transactions: Vec<T> = transactions.into_iter().collect();
         header.transactions_root = crate::proofs::calculate_transaction_root(&transactions);
         header.ommers_hash = crate::EMPTY_OMMER_ROOT_HASH;
-        Self::new(header, BlockBody { transactions, ommers: Vec::new(), withdrawals: None })
+        // reth-v2.8.1 migration: `from_transactions` is new in alloy 2.x; like `withdrawals`, the 0G
+        // `slashed` field starts empty.
+        Self::new(
+            header,
+            BlockBody { transactions, ommers: Vec::new(), withdrawals: None, slashed: None },
+        )
     }
 }
 
@@ -233,7 +240,12 @@ where
 #[derive(Debug, Clone, PartialEq, Eq, RlpEncodable, RlpDecodable)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "borsh", derive(borsh::BorshSerialize, borsh::BorshDeserialize))]
-#[rlp(trailing(no_gaps))]
+// reth-v2.8.1 migration: alloy 2.x (#4058) switched this to `trailing(no_gaps)`, which cannot
+// encode an empty optional field followed by a present one. The 0G fields need that gap (e.g.
+// `slashed` absent while a later 0G field is present), written as the `0x80` placeholder exactly
+// as the previous base's plain `trailing` did, so the plain form is kept. This also gives up
+// #4058's rejection of a string in the `withdrawals` slot, which the previous base accepted too.
+#[rlp(trailing)]
 pub struct BlockBody<T, H = Header> {
     /// Transactions in this block.
     pub transactions: Vec<T>,
@@ -241,11 +253,13 @@ pub struct BlockBody<T, H = Header> {
     pub ommers: Vec<H>,
     /// Block withdrawals.
     pub withdrawals: Option<Withdrawals>,
+    /// Slashed validator entries (0G extension, not part of the block hash).
+    pub slashed: Option<Withdrawals>,
 }
 
 impl<T, H> Default for BlockBody<T, H> {
     fn default() -> Self {
-        Self { transactions: Vec::new(), ommers: Vec::new(), withdrawals: None }
+        Self { transactions: Vec::new(), ommers: Vec::new(), withdrawals: None, slashed: None }
     }
 }
 
@@ -289,6 +303,7 @@ impl<T, H> BlockBody<T, H> {
             transactions: self.transactions,
             ommers: self.ommers.into_iter().map(f).collect(),
             withdrawals: self.withdrawals,
+            slashed: self.slashed,
         }
     }
 
@@ -301,6 +316,7 @@ impl<T, H> BlockBody<T, H> {
             transactions: self.transactions,
             ommers: self.ommers.into_iter().map(f).collect::<Result<Vec<_>, _>>()?,
             withdrawals: self.withdrawals,
+            slashed: self.slashed,
         })
     }
 }
@@ -339,21 +355,27 @@ mod block_rlp {
     use super::*;
 
     #[derive(RlpDecodable)]
-    #[rlp(trailing(no_gaps))]
+    // reth-v2.8.1 migration: plain `trailing` instead of alloy 2.x's `trailing(no_gaps)`, same
+    // reason as on `BlockBody`.
+    #[rlp(trailing)]
     struct Helper<T, H> {
         header: H,
         transactions: Vec<T>,
         ommers: Vec<H>,
         withdrawals: Option<Withdrawals>,
+        slashed: Option<Withdrawals>,
     }
 
     #[derive(RlpEncodable)]
-    #[rlp(trailing(no_gaps))]
+    // reth-v2.8.1 migration: plain `trailing` instead of alloy 2.x's `trailing(no_gaps)`, same
+    // reason as on `BlockBody`.
+    #[rlp(trailing)]
     pub(crate) struct HelperRef<'a, T, H> {
         pub(crate) header: &'a H,
         pub(crate) transactions: &'a Vec<T>,
         pub(crate) ommers: &'a Vec<H>,
         pub(crate) withdrawals: Option<&'a Withdrawals>,
+        pub(crate) slashed: Option<&'a Withdrawals>,
     }
 
     impl<'a, T, H> HelperRef<'a, T, H> {
@@ -363,14 +385,22 @@ mod block_rlp {
                 transactions: &body.transactions,
                 ommers: &body.ommers,
                 withdrawals: body.withdrawals.as_ref(),
+                slashed: body.slashed.as_ref(),
             }
         }
     }
 
     impl<'a, T, H> From<&'a Block<T, H>> for HelperRef<'a, T, H> {
         fn from(block: &'a Block<T, H>) -> Self {
-            let Block { header, body: BlockBody { transactions, ommers, withdrawals } } = block;
-            Self { header, transactions, ommers, withdrawals: withdrawals.as_ref() }
+            let Block { header, body: BlockBody { transactions, ommers, withdrawals, slashed } } =
+                block;
+            Self {
+                header,
+                transactions,
+                ommers,
+                withdrawals: withdrawals.as_ref(),
+                slashed: slashed.as_ref(),
+            }
         }
     }
 
@@ -388,8 +418,8 @@ mod block_rlp {
 
     impl<T: Decodable, H: Decodable> Decodable for Block<T, H> {
         fn decode(b: &mut &[u8]) -> alloy_rlp::Result<Self> {
-            let Helper { header, transactions, ommers, withdrawals } = Helper::decode(b)?;
-            Ok(Self { header, body: BlockBody { transactions, ommers, withdrawals } })
+            let Helper { header, transactions, ommers, withdrawals, slashed } = Helper::decode(b)?;
+            Ok(Self { header, body: BlockBody { transactions, ommers, withdrawals, slashed } })
         }
     }
 
@@ -416,8 +446,13 @@ mod block_rlp {
             // Decode remaining body fields
             let transactions = Vec::<T>::decode(&mut payload)?;
             let ommers = Vec::<H>::decode(&mut payload)?;
-            let withdrawals =
-                if payload.is_empty() { None } else { Some(Decodable::decode(&mut payload)?) };
+            // reth-v2.8.1 migration: `decode_sealed` is new in alloy 2.x and decodes the body
+            // fields by hand. Upstream read `withdrawals` as `if payload.is_empty() { None } else {
+            // Some(decode) }` (the `no_gaps` rule); it now follows the plain `trailing` rule kept
+            // on `Helper`, and it also reads the 0G `slashed` field after `withdrawals`, so the
+            // result always matches `decode()`.
+            let withdrawals = decode_trailing_field(&mut payload)?;
+            let slashed = decode_trailing_field(&mut payload)?;
             if !payload.is_empty() {
                 return Err(alloy_rlp::Error::ListLengthMismatch {
                     expected: header_start.len(),
@@ -425,9 +460,23 @@ mod block_rlp {
                 });
             }
 
-            let block = Self { header, body: BlockBody { transactions, ommers, withdrawals } };
+            let block =
+                Self { header, body: BlockBody { transactions, ommers, withdrawals, slashed } };
 
             Ok(Sealed::new_unchecked(block, header_hash))
+        }
+    }
+
+    /// reth-v2.8.1 migration: decodes one optional trailing field the way `#[rlp(trailing)]`
+    /// does: absent at the end of the list or the `0x80` placeholder means `None`.
+    fn decode_trailing_field<V: Decodable>(payload: &mut &[u8]) -> alloy_rlp::Result<Option<V>> {
+        match payload.first() {
+            None => Ok(None),
+            Some(&alloy_rlp::EMPTY_STRING_CODE) => {
+                *payload = &payload[1..];
+                Ok(None)
+            }
+            Some(_) => Decodable::decode(payload).map(Some),
         }
     }
 }
@@ -449,7 +498,7 @@ where
             .map(|_| H::arbitrary(u))
             .collect::<arbitrary::Result<Vec<_>>>()?;
 
-        Ok(Self { transactions, ommers, withdrawals: u.arbitrary()? })
+        Ok(Self { transactions, ommers, withdrawals: u.arbitrary()?, slashed: u.arbitrary()? })
     }
 }
 
@@ -457,12 +506,35 @@ where
 mod tests {
     use super::*;
     use crate::{Signed, TxEnvelope, TxLegacy};
+    use alloy_eips::eip4895::{Withdrawal, Withdrawals};
+    use alloy_primitives::address;
     use alloy_rlp::{Decodable, Encodable};
 
     #[test]
     fn can_convert_block() {
         let block: Block<Signed<TxLegacy>> = Block::default();
         let _: Block<TxEnvelope> = block.convert_transactions();
+    }
+
+    #[test]
+    fn block_body_slashed_rlp_roundtrip() {
+        let body = BlockBody::<TxEnvelope, Header> {
+            transactions: vec![],
+            ommers: vec![],
+            withdrawals: Some(Withdrawals::default()),
+            slashed: Some(Withdrawals::new(vec![Withdrawal {
+                index: 0,
+                validator_index: 42,
+                address: address!("0000000000000000000000000000000000000001"),
+                amount: 1_000_000_000,
+            }])),
+        };
+
+        let mut encoded = Vec::new();
+        body.encode(&mut encoded);
+
+        let decoded = BlockBody::<TxEnvelope, Header>::decode(&mut encoded.as_slice()).unwrap();
+        assert_eq!(body, decoded);
     }
 
     #[test]
@@ -514,9 +586,15 @@ mod tests {
         let signed = tx.into_signed(sig);
         let envelope: TxEnvelope = signed.into();
 
+        // reth-v2.8.1 migration: test new in alloy 2.x; gets the 0G `slashed` field (none).
         let block = Block {
             header: Header { number: 42, gas_limit: 30_000_000, ..Default::default() },
-            body: BlockBody { transactions: vec![envelope], ommers: vec![], withdrawals: None },
+            body: BlockBody {
+                transactions: vec![envelope],
+                ommers: vec![],
+                withdrawals: None,
+                slashed: None,
+            },
         };
 
         let expected_hash = block.header.hash_slow();
