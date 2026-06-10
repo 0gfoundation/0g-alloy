@@ -1249,6 +1249,8 @@ impl<'de> serde::Deserialize<'de> for ExecutionPayloadV3 {
             blob_gas_used: u64,
             #[serde(with = "alloy_serde::quantity")]
             excess_blob_gas: u64,
+            #[serde(default, deserialize_with = "alloy_serde::null_as_default")]
+            slashed: Vec<SlashedValidatorEntry>,
         }
 
         let helper = Helper::deserialize(deserializer)?;
@@ -1274,6 +1276,7 @@ impl<'de> serde::Deserialize<'de> for ExecutionPayloadV3 {
             },
             blob_gas_used: helper.blob_gas_used,
             excess_blob_gas: helper.excess_blob_gas,
+            slashed: helper.slashed,
         })
     }
 }
