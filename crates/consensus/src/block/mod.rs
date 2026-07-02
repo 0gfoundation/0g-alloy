@@ -365,14 +365,19 @@ mod block_rlp {
     }
 
     impl<'a, T, H> HelperRef<'a, T, H> {
-        pub(crate) const fn from_parts(header: &'a H, body: &'a BlockBody<T, H>) -> Self {
+        pub(crate) fn from_parts(header: &'a H, body: &'a BlockBody<T, H>) -> Self {
             Self {
                 header,
                 transactions: &body.transactions,
                 ommers: &body.ommers,
                 withdrawals: body.withdrawals.as_ref(),
                 slashed: body.slashed.as_ref(),
-                bridge_requests: body.bridge_requests.as_ref(),
+                // Normalize `Some(empty)` -> `None`: an empty-bytes RLP item (0x80) is
+                // indistinguishable from the trailing-optional placeholder emitted for a `None`
+                // field, so encoding `Some(empty)` and decoding it back silently yields `None`.
+                // Coercing here makes that forbidden state unrepresentable on the wire and keeps
+                // encode/decode a faithful round-trip.
+                bridge_requests: body.bridge_requests.as_ref().filter(|b| !b.is_empty()),
             }
         }
     }
@@ -389,7 +394,10 @@ mod block_rlp {
                 ommers,
                 withdrawals: withdrawals.as_ref(),
                 slashed: slashed.as_ref(),
-                bridge_requests: bridge_requests.as_ref(),
+                // Normalize `Some(empty)` -> `None`: an empty-bytes RLP item (0x80) collides with
+                // the trailing-optional placeholder for a `None` field, so the round-trip would
+                // silently turn `Some(empty)` into `None`. Coerce it away on the wire.
+                bridge_requests: bridge_requests.as_ref().filter(|b| !b.is_empty()),
             }
         }
     }
@@ -588,6 +596,42 @@ mod tests {
                 BlockBody::<TxEnvelope, Header>::decode(&mut encoded.as_slice()).unwrap();
             assert_eq!(body, decoded);
         }
+    }
+
+    /// `bridge_requests: Some(empty)` is a forbidden state (its RLP item `0x80` collides with
+    /// the trailing-optional `None` placeholder). The whole-`Block` encoder (HelperRef)
+    /// normalizes it to `None`, so a block whose body carries `Some(empty)` must (a) encode
+    /// byte-identically to the same block with `None`, and (b) decode back with
+    /// `bridge_requests == None` — never `Some(empty)`, which would otherwise be a silent
+    /// encode/decode mismatch.
+    #[test]
+    fn block_bridge_some_empty_normalizes_to_none() {
+        let some_empty = Block::<TxEnvelope, Header> {
+            header: Header::default(),
+            body: BlockBody {
+                transactions: vec![],
+                ommers: vec![],
+                withdrawals: Some(sample_withdrawals()),
+                slashed: None,
+                bridge_requests: Some(Bytes::new()),
+            },
+        };
+        let none = Block::<TxEnvelope, Header> {
+            body: BlockBody { bridge_requests: None, ..some_empty.body.clone() },
+            ..some_empty.clone()
+        };
+
+        let mut enc_some_empty = Vec::new();
+        some_empty.encode(&mut enc_some_empty);
+        let mut enc_none = Vec::new();
+        none.encode(&mut enc_none);
+        assert_eq!(enc_some_empty, enc_none, "Some(empty) must encode identically to None");
+
+        let decoded = Block::<TxEnvelope, Header>::decode(&mut enc_some_empty.as_slice()).unwrap();
+        assert_eq!(
+            decoded.body.bridge_requests, None,
+            "Some(empty) must decode back as None"
+        );
     }
 
     /// Same guarantees at the whole-`Block` level (the hand-written Helper/HelperRef RLP).
