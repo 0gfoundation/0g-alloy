@@ -15,7 +15,7 @@ pub(crate) use header::serde_bincode_compat;
 use crate::Transaction;
 use alloc::vec::Vec;
 use alloy_eips::{eip2718::WithEncoded, eip4895::Withdrawals, Encodable2718, Typed2718};
-use alloy_primitives::{keccak256, Sealable, Sealed, B256};
+use alloy_primitives::{keccak256, Bytes, Sealable, Sealed, B256};
 use alloy_rlp::{Decodable, Encodable, RlpDecodable, RlpEncodable};
 
 /// Ethereum full block.
@@ -99,6 +99,7 @@ impl<T, H> Block<T, H> {
                 ommers: self.body.ommers,
                 withdrawals: self.body.withdrawals,
                 slashed: self.body.slashed,
+                bridge_requests: self.body.bridge_requests,
             },
         }
     }
@@ -122,6 +123,7 @@ impl<T, H> Block<T, H> {
                 ommers: self.body.ommers,
                 withdrawals: self.body.withdrawals,
                 slashed: self.body.slashed,
+                bridge_requests: self.body.bridge_requests,
             },
         })
     }
@@ -199,11 +201,17 @@ impl<T: Encodable2718> Block<T, Header> {
         let transactions: Vec<T> = transactions.into_iter().collect();
         header.transactions_root = crate::proofs::calculate_transaction_root(&transactions);
         header.ommers_hash = crate::EMPTY_OMMER_ROOT_HASH;
-        // reth-v2.8.1 migration: `from_transactions` is new in alloy 2.x; like `withdrawals`, the 0G
-        // `slashed` field starts empty.
+        // reth-v2.8.1 migration: `from_transactions` is new in alloy 2.x; like `withdrawals`, the
+        // 0G `slashed` and `bridge_requests` fields start empty.
         Self::new(
             header,
-            BlockBody { transactions, ommers: Vec::new(), withdrawals: None, slashed: None },
+            BlockBody {
+                transactions,
+                ommers: Vec::new(),
+                withdrawals: None,
+                slashed: None,
+                bridge_requests: None,
+            },
         )
     }
 }
@@ -255,11 +263,26 @@ pub struct BlockBody<T, H = Header> {
     pub withdrawals: Option<Withdrawals>,
     /// Slashed validator entries (0G extension, not part of the block hash).
     pub slashed: Option<Withdrawals>,
+    /// 0G: CL-determined `BridgeRequests` SSZ blob, carried verbatim (the data portion of the
+    /// EIP-7685 type-`0xf0` requests entry, without the type byte). `Some` (at least 4 bytes,
+    /// the SSZ empty-list offset) iff the Bridge fork is active at the block timestamp; `None`
+    /// on all pre-Bridge blocks, which keeps their RLP encoding byte-identical to the
+    /// pre-extension format. Not hashed into the body roots: the block hash already commits to
+    /// these bytes through the header's `requests_hash`. Must never be `Some` of empty bytes —
+    /// an empty-bytes RLP item (`0x80`) is indistinguishable from the trailing-optional
+    /// placeholder emitted for a `None` field that precedes a `Some` field.
+    pub bridge_requests: Option<Bytes>,
 }
 
 impl<T, H> Default for BlockBody<T, H> {
     fn default() -> Self {
-        Self { transactions: Vec::new(), ommers: Vec::new(), withdrawals: None, slashed: None }
+        Self {
+            transactions: Vec::new(),
+            ommers: Vec::new(),
+            withdrawals: None,
+            slashed: None,
+            bridge_requests: None,
+        }
     }
 }
 
@@ -304,6 +327,7 @@ impl<T, H> BlockBody<T, H> {
             ommers: self.ommers.into_iter().map(f).collect(),
             withdrawals: self.withdrawals,
             slashed: self.slashed,
+            bridge_requests: self.bridge_requests,
         }
     }
 
@@ -317,6 +341,7 @@ impl<T, H> BlockBody<T, H> {
             ommers: self.ommers.into_iter().map(f).collect::<Result<Vec<_>, _>>()?,
             withdrawals: self.withdrawals,
             slashed: self.slashed,
+            bridge_requests: self.bridge_requests,
         })
     }
 }
@@ -364,6 +389,7 @@ mod block_rlp {
         ommers: Vec<H>,
         withdrawals: Option<Withdrawals>,
         slashed: Option<Withdrawals>,
+        bridge_requests: Option<Bytes>,
     }
 
     #[derive(RlpEncodable)]
@@ -376,30 +402,43 @@ mod block_rlp {
         pub(crate) ommers: &'a Vec<H>,
         pub(crate) withdrawals: Option<&'a Withdrawals>,
         pub(crate) slashed: Option<&'a Withdrawals>,
+        pub(crate) bridge_requests: Option<&'a Bytes>,
     }
 
     impl<'a, T, H> HelperRef<'a, T, H> {
-        pub(crate) const fn from_parts(header: &'a H, body: &'a BlockBody<T, H>) -> Self {
+        pub(crate) fn from_parts(header: &'a H, body: &'a BlockBody<T, H>) -> Self {
             Self {
                 header,
                 transactions: &body.transactions,
                 ommers: &body.ommers,
                 withdrawals: body.withdrawals.as_ref(),
                 slashed: body.slashed.as_ref(),
+                // Normalize `Some(empty)` -> `None`: an empty-bytes RLP item (0x80) is
+                // indistinguishable from the trailing-optional placeholder emitted for a `None`
+                // field, so encoding `Some(empty)` and decoding it back silently yields `None`.
+                // Coercing here makes that forbidden state unrepresentable on the wire and keeps
+                // encode/decode a faithful round-trip.
+                bridge_requests: body.bridge_requests.as_ref().filter(|b| !b.is_empty()),
             }
         }
     }
 
     impl<'a, T, H> From<&'a Block<T, H>> for HelperRef<'a, T, H> {
         fn from(block: &'a Block<T, H>) -> Self {
-            let Block { header, body: BlockBody { transactions, ommers, withdrawals, slashed } } =
-                block;
+            let Block {
+                header,
+                body: BlockBody { transactions, ommers, withdrawals, slashed, bridge_requests },
+            } = block;
             Self {
                 header,
                 transactions,
                 ommers,
                 withdrawals: withdrawals.as_ref(),
                 slashed: slashed.as_ref(),
+                // Normalize `Some(empty)` -> `None`: an empty-bytes RLP item (0x80) collides with
+                // the trailing-optional placeholder for a `None` field, so the round-trip would
+                // silently turn `Some(empty)` into `None`. Coerce it away on the wire.
+                bridge_requests: bridge_requests.as_ref().filter(|b| !b.is_empty()),
             }
         }
     }
@@ -418,8 +457,12 @@ mod block_rlp {
 
     impl<T: Decodable, H: Decodable> Decodable for Block<T, H> {
         fn decode(b: &mut &[u8]) -> alloy_rlp::Result<Self> {
-            let Helper { header, transactions, ommers, withdrawals, slashed } = Helper::decode(b)?;
-            Ok(Self { header, body: BlockBody { transactions, ommers, withdrawals, slashed } })
+            let Helper { header, transactions, ommers, withdrawals, slashed, bridge_requests } =
+                Helper::decode(b)?;
+            Ok(Self {
+                header,
+                body: BlockBody { transactions, ommers, withdrawals, slashed, bridge_requests },
+            })
         }
     }
 
@@ -453,6 +496,8 @@ mod block_rlp {
             // result always matches `decode()`.
             let withdrawals = decode_trailing_field(&mut payload)?;
             let slashed = decode_trailing_field(&mut payload)?;
+            // reth-v2.8.1 migration: likewise reads the 0G `bridge_requests` field after `slashed`.
+            let bridge_requests = decode_trailing_field(&mut payload)?;
             if !payload.is_empty() {
                 return Err(alloy_rlp::Error::ListLengthMismatch {
                     expected: header_start.len(),
@@ -460,8 +505,10 @@ mod block_rlp {
                 });
             }
 
-            let block =
-                Self { header, body: BlockBody { transactions, ommers, withdrawals, slashed } };
+            let block = Self {
+                header,
+                body: BlockBody { transactions, ommers, withdrawals, slashed, bridge_requests },
+            };
 
             Ok(Sealed::new_unchecked(block, header_hash))
         }
@@ -498,7 +545,20 @@ where
             .map(|_| H::arbitrary(u))
             .collect::<arbitrary::Result<Vec<_>>>()?;
 
-        Ok(Self { transactions, ommers, withdrawals: u.arbitrary()?, slashed: u.arbitrary()? })
+        // `Some` of empty bytes is forbidden for `bridge_requests` (its RLP item would collide
+        // with the trailing-optional placeholder), so filter empties out of arbitrary data.
+        let bridge_requests = u
+            .arbitrary::<Option<alloc::vec::Vec<u8>>>()?
+            .filter(|b| !b.is_empty())
+            .map(Bytes::from);
+
+        Ok(Self {
+            transactions,
+            ommers,
+            withdrawals: u.arbitrary()?,
+            slashed: u.arbitrary()?,
+            bridge_requests,
+        })
     }
 }
 
@@ -528,6 +588,7 @@ mod tests {
                 address: address!("0000000000000000000000000000000000000001"),
                 amount: 1_000_000_000,
             }])),
+            bridge_requests: None,
         };
 
         let mut encoded = Vec::new();
@@ -586,7 +647,8 @@ mod tests {
         let signed = tx.into_signed(sig);
         let envelope: TxEnvelope = signed.into();
 
-        // reth-v2.8.1 migration: test new in alloy 2.x; gets the 0G `slashed` field (none).
+        // reth-v2.8.1 migration: test new in alloy 2.x; gets the 0G `slashed` and
+        // `bridge_requests` fields (none).
         let block = Block {
             header: Header { number: 42, gas_limit: 30_000_000, ..Default::default() },
             body: BlockBody {
@@ -594,6 +656,7 @@ mod tests {
                 ommers: vec![],
                 withdrawals: None,
                 slashed: None,
+                bridge_requests: None,
             },
         };
 
@@ -691,6 +754,200 @@ mod tests {
         let present_string = block_rlp_with_body_fields(&[0xc0, 0xc0, 0x80]);
         assert!(Block::<TxEnvelope>::decode(&mut present_string.as_slice()).is_err());
         assert!(Block::<TxEnvelope>::decode_sealed(&mut present_string.as_slice()).is_err());
+    }
+
+    /// The pre-`bridge_requests` body shape (transactions, ommers, withdrawals, slashed) with
+    /// identical RLP derives — used to prove byte-level encoding compatibility below.
+    #[derive(Debug, PartialEq, RlpEncodable, RlpDecodable)]
+    #[rlp(trailing)]
+    struct PreBridgeBlockBody<T, H> {
+        transactions: Vec<T>,
+        ommers: Vec<H>,
+        withdrawals: Option<Withdrawals>,
+        slashed: Option<Withdrawals>,
+    }
+
+    fn sample_withdrawals() -> Withdrawals {
+        Withdrawals::new(vec![Withdrawal {
+            index: 7,
+            validator_index: u64::MAX,
+            address: address!("00000000000000000000000000000000000000aa"),
+            amount: 123_456,
+        }])
+    }
+
+    /// SSZ encoding of an empty `BridgeRequests { messages: [] }` container: a single 4-byte
+    /// offset. This is the smallest blob the CL ever emits post-Bridge.
+    const EMPTY_BRIDGE_SSZ: [u8; 4] = [0x04, 0x00, 0x00, 0x00];
+
+    /// A body with `bridge_requests: None` must encode byte-identically to the pre-extension
+    /// struct, so pre-Bridge blocks keep their historical devp2p/storage encoding and old and
+    /// new binaries interoperate before the fork.
+    #[test]
+    fn block_body_pre_bridge_encoding_byte_identical() {
+        let cases: Vec<(Option<Withdrawals>, Option<Withdrawals>)> = vec![
+            (None, None),
+            (Some(Withdrawals::default()), None),
+            (Some(sample_withdrawals()), None),
+            (Some(sample_withdrawals()), Some(sample_withdrawals())),
+        ];
+        for (withdrawals, slashed) in cases {
+            let old = PreBridgeBlockBody::<TxEnvelope, Header> {
+                transactions: vec![],
+                ommers: vec![],
+                withdrawals: withdrawals.clone(),
+                slashed: slashed.clone(),
+            };
+            let new = BlockBody::<TxEnvelope, Header> {
+                transactions: vec![],
+                ommers: vec![],
+                withdrawals,
+                slashed,
+                bridge_requests: None,
+            };
+
+            let mut old_encoded = Vec::new();
+            old.encode(&mut old_encoded);
+            let mut new_encoded = Vec::new();
+            new.encode(&mut new_encoded);
+            assert_eq!(old_encoded, new_encoded, "pre-Bridge encoding changed");
+
+            // Old bytes decode into the new struct with bridge_requests = None.
+            let decoded =
+                BlockBody::<TxEnvelope, Header>::decode(&mut old_encoded.as_slice()).unwrap();
+            assert_eq!(decoded, new);
+        }
+    }
+
+    /// `slashed: None` + `bridge_requests: Some` exercises the trailing-optional placeholder
+    /// (`0x80`) the RLP derive writes for the interior `None`; it must round-trip.
+    #[test]
+    fn block_body_bridge_placeholder_roundtrip() {
+        let bodies = vec![
+            // withdrawals Some, slashed None, bridge Some — the common post-fork shape
+            BlockBody::<TxEnvelope, Header> {
+                transactions: vec![],
+                ommers: vec![],
+                withdrawals: Some(sample_withdrawals()),
+                slashed: None,
+                bridge_requests: Some(Bytes::from(EMPTY_BRIDGE_SSZ.to_vec())),
+            },
+            // both interior options None, bridge Some — two placeholders
+            BlockBody::<TxEnvelope, Header> {
+                transactions: vec![],
+                ommers: vec![],
+                withdrawals: None,
+                slashed: None,
+                bridge_requests: Some(Bytes::from(vec![0xde, 0xad, 0xbe, 0xef, 0x01])),
+            },
+            // everything Some
+            BlockBody::<TxEnvelope, Header> {
+                transactions: vec![],
+                ommers: vec![],
+                withdrawals: Some(sample_withdrawals()),
+                slashed: Some(sample_withdrawals()),
+                bridge_requests: Some(Bytes::from(vec![0x04, 0x00, 0x00, 0x00, 0xff, 0x11])),
+            },
+        ];
+        for body in bodies {
+            let mut encoded = Vec::new();
+            body.encode(&mut encoded);
+            let decoded =
+                BlockBody::<TxEnvelope, Header>::decode(&mut encoded.as_slice()).unwrap();
+            assert_eq!(body, decoded);
+        }
+    }
+
+    /// `bridge_requests: Some(empty)` is a forbidden state (its RLP item `0x80` collides with
+    /// the trailing-optional `None` placeholder). The whole-`Block` encoder (HelperRef)
+    /// normalizes it to `None`, so a block whose body carries `Some(empty)` must (a) encode
+    /// byte-identically to the same block with `None`, and (b) decode back with
+    /// `bridge_requests == None` — never `Some(empty)`, which would otherwise be a silent
+    /// encode/decode mismatch.
+    #[test]
+    fn block_bridge_some_empty_normalizes_to_none() {
+        let some_empty = Block::<TxEnvelope, Header> {
+            header: Header::default(),
+            body: BlockBody {
+                transactions: vec![],
+                ommers: vec![],
+                withdrawals: Some(sample_withdrawals()),
+                slashed: None,
+                bridge_requests: Some(Bytes::new()),
+            },
+        };
+        let none = Block::<TxEnvelope, Header> {
+            body: BlockBody { bridge_requests: None, ..some_empty.body.clone() },
+            ..some_empty.clone()
+        };
+
+        let mut enc_some_empty = Vec::new();
+        some_empty.encode(&mut enc_some_empty);
+        let mut enc_none = Vec::new();
+        none.encode(&mut enc_none);
+        assert_eq!(enc_some_empty, enc_none, "Some(empty) must encode identically to None");
+
+        let decoded = Block::<TxEnvelope, Header>::decode(&mut enc_some_empty.as_slice()).unwrap();
+        assert_eq!(
+            decoded.body.bridge_requests, None,
+            "Some(empty) must decode back as None"
+        );
+    }
+
+    /// Same guarantees at the whole-`Block` level (the hand-written Helper/HelperRef RLP).
+    #[test]
+    fn block_rlp_pre_bridge_identity_and_bridge_roundtrip() {
+        #[derive(RlpEncodable)]
+        #[rlp(trailing)]
+        struct PreBridgeBlockRef<'a, T, H> {
+            header: &'a H,
+            transactions: &'a Vec<T>,
+            ommers: &'a Vec<H>,
+            withdrawals: Option<&'a Withdrawals>,
+            slashed: Option<&'a Withdrawals>,
+        }
+
+        // pre-Bridge block: byte identity with the old encoding
+        let block = Block::<TxEnvelope, Header> {
+            header: Header::default(),
+            body: BlockBody {
+                transactions: vec![],
+                ommers: vec![],
+                withdrawals: Some(sample_withdrawals()),
+                slashed: None,
+                bridge_requests: None,
+            },
+        };
+        let old = PreBridgeBlockRef {
+            header: &block.header,
+            transactions: &block.body.transactions,
+            ommers: &block.body.ommers,
+            withdrawals: block.body.withdrawals.as_ref(),
+            slashed: block.body.slashed.as_ref(),
+        };
+        let mut old_encoded = Vec::new();
+        old.encode(&mut old_encoded);
+        let mut new_encoded = Vec::new();
+        block.encode(&mut new_encoded);
+        assert_eq!(old_encoded, new_encoded, "pre-Bridge Block encoding changed");
+        let decoded = Block::<TxEnvelope, Header>::decode(&mut old_encoded.as_slice()).unwrap();
+        assert_eq!(decoded, block);
+
+        // post-Bridge block: placeholder + blob round-trip
+        let block = Block::<TxEnvelope, Header> {
+            header: Header::default(),
+            body: BlockBody {
+                transactions: vec![],
+                ommers: vec![],
+                withdrawals: Some(sample_withdrawals()),
+                slashed: None,
+                bridge_requests: Some(Bytes::from(EMPTY_BRIDGE_SSZ.to_vec())),
+            },
+        };
+        let mut encoded = Vec::new();
+        block.encode(&mut encoded);
+        let decoded = Block::<TxEnvelope, Header>::decode(&mut encoded.as_slice()).unwrap();
+        assert_eq!(decoded, block);
     }
 }
 
