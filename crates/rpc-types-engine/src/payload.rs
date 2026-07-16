@@ -839,7 +839,13 @@ impl ExecutionPayloadV1 {
 
         Ok(Block {
             header,
-            body: BlockBody { transactions: self.transactions, ommers: vec![], withdrawals: None, slashed: None },
+            body: BlockBody {
+                transactions: self.transactions,
+                ommers: vec![],
+                withdrawals: None,
+                slashed: None,
+                bridge_requests: None,
+            },
         })
     }
 

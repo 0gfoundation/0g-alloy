@@ -161,6 +161,7 @@ impl<T, H> Block<T, H> {
             ommers: Default::default(),
             withdrawals: self.withdrawals,
             slashed: None,
+            bridge_requests: None,
         }
     }
 
@@ -180,6 +181,7 @@ impl<T, H> Block<T, H> {
             ommers: vec![],
             withdrawals: self.withdrawals,
             slashed: None,
+            bridge_requests: None,
         }
         .into_block(self.header)
     }
@@ -330,7 +332,8 @@ impl<T> Block<T> {
         let size = U256::from(block.length());
         let alloy_consensus::Block {
             header,
-            body: alloy_consensus::BlockBody { transactions, ommers, withdrawals, slashed: _ },
+            body:
+                alloy_consensus::BlockBody { transactions, ommers, withdrawals, slashed: _, bridge_requests: _ },
         } = block;
 
         Self {
@@ -355,6 +358,7 @@ impl<T> Block<T> {
             ommers: vec![],
             withdrawals,
             slashed: None,
+            bridge_requests: None,
         }
         .into_block(header.into_consensus())
     }
