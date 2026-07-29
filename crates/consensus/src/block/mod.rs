@@ -369,6 +369,17 @@ impl<T: Typed2718, H> BlockBody<T, H> {
 mod block_rlp {
     use super::*;
 
+    fn decode_trailing<T: Decodable>(buf: &mut &[u8]) -> alloy_rlp::Result<Option<T>> {
+        if buf.is_empty() {
+            return Ok(None);
+        }
+        if buf[0] == alloy_rlp::EMPTY_STRING_CODE {
+            *buf = &buf[1..];
+            return Ok(None);
+        }
+        T::decode(buf).map(Some)
+    }
+
     #[derive(RlpDecodable)]
     #[rlp(trailing)]
     struct Helper<T, H> {
@@ -472,25 +483,14 @@ mod block_rlp {
             // Decode remaining body fields
             let transactions = Vec::<T>::decode(buf)?;
             let ommers = Vec::<H>::decode(buf)?;
-            let withdrawals =
-                if buf.is_empty() { None } else { Option::<Withdrawals>::decode(buf)? };
-            let slashed =
-                if buf.is_empty() { None } else { Option::<Withdrawals>::decode(buf)? };
-            let bridge_requests = if buf.is_empty() {
-                None
-            } else {
-                Option::<Bytes>::decode(buf)?.filter(|requests| !requests.is_empty())
-            };
+            let withdrawals = decode_trailing(buf)?;
+            let slashed = decode_trailing(buf)?;
+            let bridge_requests =
+                decode_trailing::<Bytes>(buf)?.filter(|requests| !requests.is_empty());
 
             let block = Self {
                 header,
-                body: BlockBody {
-                    transactions,
-                    ommers,
-                    withdrawals,
-                    slashed,
-                    bridge_requests,
-                },
+                body: BlockBody { transactions, ommers, withdrawals, slashed, bridge_requests },
             };
 
             Ok(Sealed::new_unchecked(block, header_hash))
@@ -621,7 +621,7 @@ mod tests {
     }
 
     #[test]
-    fn block_body_rejects_present_string_withdrawals() {
+    fn block_body_decodes_trailing_withdrawals_placeholder() {
         let mut omitted: &[u8] = &[0xc2, 0xc0, 0xc0];
         let body = BlockBody::<TxEnvelope>::decode(&mut omitted).unwrap();
         assert!(body.withdrawals.is_none());
@@ -633,7 +633,9 @@ mod tests {
         assert!(present_empty.is_empty());
 
         let mut present_string: &[u8] = &[0xc3, 0xc0, 0xc0, 0x80];
-        assert!(BlockBody::<TxEnvelope>::decode(&mut present_string).is_err());
+        let body = BlockBody::<TxEnvelope>::decode(&mut present_string).unwrap();
+        assert!(body.withdrawals.is_none());
+        assert!(present_string.is_empty());
     }
 
     #[test]
@@ -660,8 +662,8 @@ mod tests {
         assert!(Block::<TxEnvelope>::decode_sealed(&mut present_empty.as_slice()).is_ok());
 
         let present_string = block_rlp_with_body_fields(&[0xc0, 0xc0, 0x80]);
-        assert!(Block::<TxEnvelope>::decode(&mut present_string.as_slice()).is_err());
-        assert!(Block::<TxEnvelope>::decode_sealed(&mut present_string.as_slice()).is_err());
+        assert!(Block::<TxEnvelope>::decode(&mut present_string.as_slice()).is_ok());
+        assert!(Block::<TxEnvelope>::decode_sealed(&mut present_string.as_slice()).is_ok());
     }
 
     #[test]
@@ -782,8 +784,7 @@ mod tests {
         for body in bodies {
             let mut encoded = Vec::new();
             body.encode(&mut encoded);
-            let decoded =
-                BlockBody::<TxEnvelope, Header>::decode(&mut encoded.as_slice()).unwrap();
+            let decoded = BlockBody::<TxEnvelope, Header>::decode(&mut encoded.as_slice()).unwrap();
             assert_eq!(body, decoded);
         }
     }
@@ -818,10 +819,28 @@ mod tests {
         assert_eq!(enc_some_empty, enc_none, "Some(empty) must encode identically to None");
 
         let decoded = Block::<TxEnvelope, Header>::decode(&mut enc_some_empty.as_slice()).unwrap();
-        assert_eq!(
-            decoded.body.bridge_requests, None,
-            "Some(empty) must decode back as None"
-        );
+        assert_eq!(decoded.body.bridge_requests, None, "Some(empty) must decode back as None");
+    }
+
+    #[test]
+    #[cfg(feature = "serde")]
+    fn block_body_bridge_serde_absent_and_empty_roundtrip() {
+        let absent: BlockBody<TxEnvelope, Header> = serde_json::from_value(serde_json::json!({
+            "transactions": [],
+            "ommers": [],
+            "withdrawals": null,
+            "slashed": null
+        }))
+        .unwrap();
+        assert!(absent.bridge_requests.is_none());
+
+        let empty = BlockBody::<TxEnvelope, Header> {
+            bridge_requests: Some(Bytes::new()),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&empty).unwrap();
+        assert_eq!(json["bridge_requests"], "0x");
+        assert_eq!(serde_json::from_value::<BlockBody<TxEnvelope, Header>>(json).unwrap(), empty);
     }
 
     /// Same guarantees at the whole-`Block` level (the hand-written Helper/HelperRef RLP).
