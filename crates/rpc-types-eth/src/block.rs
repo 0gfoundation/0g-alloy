@@ -333,7 +333,13 @@ impl<T> Block<T> {
         let alloy_consensus::Block {
             header,
             body:
-                alloy_consensus::BlockBody { transactions, ommers, withdrawals, slashed: _, bridge_requests: _ },
+                alloy_consensus::BlockBody {
+                    transactions,
+                    ommers,
+                    withdrawals,
+                    slashed: _,
+                    bridge_requests: _,
+                },
         } = block;
 
         Self {
