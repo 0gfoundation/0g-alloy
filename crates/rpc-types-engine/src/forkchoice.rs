@@ -231,6 +231,7 @@ mod tests {
                     validation_error: "invalid block number".to_string(),
                 },
                 latest_valid_hash: Some(B256::with_last_byte(4)),
+                execution_requests: Vec::new(),
             },
             payload_id: Some(PayloadId(alloy_primitives::B64::with_last_byte(5))),
         };

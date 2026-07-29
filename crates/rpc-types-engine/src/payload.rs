@@ -24,10 +24,7 @@ use alloy_eips::{
     BlockNumHash,
 };
 use alloy_primitives::{keccak256, Address, Bloom, Bytes, Sealable, Sealed, B256, B64, U256};
-use core::{
-    iter::{FromIterator, IntoIterator},
-    ops::Deref,
-};
+use core::iter::{FromIterator, IntoIterator};
 
 /// A slashed validator entry in an execution payload.
 ///
@@ -1218,7 +1215,11 @@ pub struct ExecutionPayloadV3 {
     /// Slashed validator entries (0G extension, same encoding as [`Withdrawal`]).
     #[cfg_attr(
         feature = "serde",
-        serde(default, deserialize_with = "alloy_serde::null_as_default", skip_serializing_if = "Vec::is_empty")
+        serde(
+            default,
+            deserialize_with = "alloy_serde::null_as_default",
+            skip_serializing_if = "Vec::is_empty"
+        )
     )]
     pub slashed: Vec<SlashedValidatorEntry>,
 }
@@ -1312,12 +1313,7 @@ impl ExecutionPayloadV3 {
         Self {
             blob_gas_used: block.blob_gas_used().unwrap_or_default(),
             excess_blob_gas: block.excess_blob_gas().unwrap_or_default(),
-            slashed: block
-                .body
-                .slashed
-                .clone()
-                .map(Withdrawals::into_inner)
-                .unwrap_or_default(),
+            slashed: block.body.slashed.clone().map(Withdrawals::into_inner).unwrap_or_default(),
             payload_inner: ExecutionPayloadV2::from_block_unchecked(block_hash, block),
         }
     }
@@ -1570,6 +1566,8 @@ impl<'de> serde::Deserialize<'de> for ExecutionPayloadV4 {
             blob_gas_used: u64,
             #[serde(with = "alloy_serde::quantity")]
             excess_blob_gas: u64,
+            #[serde(default, deserialize_with = "alloy_serde::null_as_default")]
+            slashed: Vec<SlashedValidatorEntry>,
             block_access_list: Bytes,
             #[serde(with = "alloy_serde::quantity")]
             slot_number: u64,
@@ -1599,6 +1597,7 @@ impl<'de> serde::Deserialize<'de> for ExecutionPayloadV4 {
                 },
                 blob_gas_used: helper.blob_gas_used,
                 excess_blob_gas: helper.excess_blob_gas,
+                slashed: helper.slashed,
             },
             block_access_list: helper.block_access_list,
             slot_number: helper.slot_number,
@@ -1660,6 +1659,7 @@ impl ssz::Decode for ExecutionPayloadV4 {
                 },
                 blob_gas_used: decoder.decode_next()?,
                 excess_blob_gas: decoder.decode_next()?,
+                slashed: Vec::new(),
             },
             block_access_list: decoder.decode_next()?,
             slot_number: decoder.decode_next()?,
@@ -3855,13 +3855,11 @@ impl serde::Serialize for PayloadStatus {
     where
         S: serde::Serializer,
     {
-        let requests = self.execution_requests.iter().map(Bytes::deref).collect::<Vec<_>>();
-
         use serde::ser::SerializeMap;
         let mut map = serializer.serialize_map(Some(4))?;
         map.serialize_entry("status", self.status.as_str())?;
         map.serialize_entry("latestValidHash", &self.latest_valid_hash)?;
-        map.serialize_entry("executionRequests", &requests)?;
+        map.serialize_entry("executionRequests", &self.execution_requests)?;
         map.serialize_entry("validationError", &self.status.validation_error())?;
         map.end()
     }
@@ -4360,6 +4358,7 @@ mod tests {
             payload_inner: ssz_payload_v2(),
             blob_gas_used: 16,
             excess_blob_gas: 17,
+            slashed: Vec::new(),
         }
     }
 
@@ -4482,15 +4481,31 @@ mod tests {
         assert_eq!(status.status, PayloadStatusEnum::Syncing);
         assert!(status.latest_valid_hash.is_none());
         assert!(status.status.validation_error().is_none());
-        assert_eq!(serde_json::to_string(&status).unwrap(), s);
+        let full = r#"{"status":"SYNCING","latestValidHash":null,"executionRequests":[],"validationError":null}"#;
+        assert_eq!(serde_json::to_string(&status).unwrap(), full);
 
-        let full = s;
         let s = r#"{"status":"SYNCING","latestValidHash":null}"#;
         let status: PayloadStatus = serde_json::from_str(s).unwrap();
         assert_eq!(status.status, PayloadStatusEnum::Syncing);
         assert!(status.latest_valid_hash.is_none());
         assert!(status.status.validation_error().is_none());
         assert_eq!(serde_json::to_string(&status).unwrap(), full);
+    }
+
+    #[test]
+    #[cfg(feature = "serde")]
+    fn serde_payload_status_execution_requests_roundtrip() {
+        let status = PayloadStatus::new(
+            PayloadStatusEnum::Valid,
+            None,
+            vec![Bytes::from_static(&[0xf0, 0x04, 0x00, 0x00, 0x00])],
+        );
+        let json = serde_json::to_string(&status).unwrap();
+        assert_eq!(
+            json,
+            r#"{"status":"VALID","latestValidHash":null,"executionRequests":["0xf004000000"],"validationError":null}"#
+        );
+        assert_eq!(serde_json::from_str::<PayloadStatus>(&json).unwrap(), status);
     }
 
     #[test]
@@ -4645,13 +4660,23 @@ mod tests {
             PayloadStatus {
                 status: PayloadStatusEnum::Valid,
                 latest_valid_hash: Some(B256::with_last_byte(1)),
+                execution_requests: Vec::new(),
             },
             PayloadStatus {
                 status: PayloadStatusEnum::Invalid { validation_error: "bad payload".to_string() },
                 latest_valid_hash: Some(B256::with_last_byte(2)),
+                execution_requests: Vec::new(),
             },
-            PayloadStatus { status: PayloadStatusEnum::Syncing, latest_valid_hash: None },
-            PayloadStatus { status: PayloadStatusEnum::Accepted, latest_valid_hash: None },
+            PayloadStatus {
+                status: PayloadStatusEnum::Syncing,
+                latest_valid_hash: None,
+                execution_requests: Vec::new(),
+            },
+            PayloadStatus {
+                status: PayloadStatusEnum::Accepted,
+                latest_valid_hash: None,
+                execution_requests: Vec::new(),
+            },
         ];
 
         for status in statuses {
@@ -4668,6 +4693,7 @@ mod tests {
         let status = PayloadStatus {
             status: PayloadStatusEnum::Invalid { validation_error: "bad payload".to_string() },
             latest_valid_hash: None,
+            execution_requests: Vec::new(),
         };
         let spec = (1u8, B256::ZERO, b"bad payload".to_vec());
 
@@ -5793,6 +5819,7 @@ mod tests {
                 },
                 blob_gas_used: 0,
                 excess_blob_gas: 0,
+                slashed: vec![],
             },
             block_access_list: Bytes::from(vec![0xaa, 0xbb]),
             slot_number: 0,
@@ -5922,6 +5949,7 @@ mod tests {
                 },
                 blob_gas_used: 0,
                 excess_blob_gas: 0,
+                slashed: vec![],
             },
             block_access_list: block_access_list.clone(),
             slot_number: 7,
@@ -6014,6 +6042,7 @@ mod tests {
                     },
                     blob_gas_used: 0,
                     excess_blob_gas: 0,
+                    slashed: vec![],
                 },
                 block_value: U256::from(1u64),
                 blobs_bundle: BlobsBundleV1::empty(),
@@ -6055,6 +6084,7 @@ mod tests {
             },
             blob_gas_used: 0,
             excess_blob_gas: 0,
+            slashed: vec![],
         };
 
         let serialized = serde_json::to_string(&payload).unwrap();
