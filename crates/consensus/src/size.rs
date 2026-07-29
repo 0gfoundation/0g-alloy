@@ -110,6 +110,16 @@ impl<T: InMemorySize, H: InMemorySize> InMemorySize for crate::BlockBody<T, H> {
                 .withdrawals
                 .as_ref()
                 .map_or(core::mem::size_of::<Option<Withdrawals>>(), Withdrawals::total_size)
+            + self
+                .slashed
+                .as_ref()
+                .map_or(core::mem::size_of::<Option<Withdrawals>>(), Withdrawals::total_size)
+            + self
+                .bridge_requests
+                .as_ref()
+                .map_or(core::mem::size_of::<Option<alloy_primitives::Bytes>>(), |requests| {
+                    requests.len()
+                })
     }
 }
 
@@ -148,5 +158,25 @@ mod tests {
         assert_no_recursion::<TxEip1559>();
         assert_no_recursion::<TxEip7702>();
         assert_no_recursion::<TxEip4844>();
+    }
+
+    #[test]
+    fn block_body_size_counts_0g_fields() {
+        let body = crate::BlockBody::<u64>::default();
+
+        let slashed = Withdrawals::default();
+        let with_slashed = crate::BlockBody { slashed: Some(slashed.clone()), ..body.clone() };
+        assert_eq!(
+            with_slashed.size(),
+            body.size() - core::mem::size_of_val(&body.slashed) + slashed.total_size()
+        );
+
+        let bridge_requests = alloy_primitives::Bytes::from_static(&[4, 0, 0, 0, 0xaa]);
+        let with_bridge =
+            crate::BlockBody { bridge_requests: Some(bridge_requests.clone()), ..body.clone() };
+        assert_eq!(
+            with_bridge.size(),
+            body.size() - core::mem::size_of_val(&body.bridge_requests) + bridge_requests.len()
+        );
     }
 }
