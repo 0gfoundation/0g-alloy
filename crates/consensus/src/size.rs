@@ -110,6 +110,18 @@ impl<T: InMemorySize, H: InMemorySize> InMemorySize for crate::BlockBody<T, H> {
                 .withdrawals
                 .as_ref()
                 .map_or(core::mem::size_of::<Option<Withdrawals>>(), Withdrawals::total_size)
+            // reth-v2.8.1 migration: in 0g-reth (reth 1.8.1) this impl lived in reth's
+            // `primitives-traits/src/size.rs`, where the 0G commits 6a4f950b1 (slashed) and
+            // 880ce24ad (bridge_requests) added the two terms below. Upstream moved the impl here
+            // (alloy #3656, reth #23184), so the 0G terms are carried over unchanged.
+            + self
+                .slashed
+                .as_ref()
+                .map_or(core::mem::size_of::<Option<Withdrawals>>(), Withdrawals::total_size)
+            + self
+                .bridge_requests
+                .as_ref()
+                .map_or(core::mem::size_of::<Option<alloy_primitives::Bytes>>(), |b| b.len())
     }
 }
 
@@ -148,5 +160,27 @@ mod tests {
         assert_no_recursion::<TxEip1559>();
         assert_no_recursion::<TxEip7702>();
         assert_no_recursion::<TxEip4844>();
+    }
+
+    // reth-v2.8.1 migration: the 0G `slashed` and `bridge_requests` fields count towards the body
+    // size the same way 0g-reth's `primitives-traits` counted them.
+    #[test]
+    fn block_body_size_counts_0g_fields() {
+        use alloy_eips::eip4895::Withdrawal;
+        use alloy_primitives::Bytes;
+
+        let none: crate::BlockBody<TxLegacy> = crate::BlockBody::default();
+        let mut with_0g = none.clone();
+        let slashed = Withdrawals::new(vec![Withdrawal::default(); 3]);
+        let bridge = Bytes::from(vec![0u8; 100]);
+        with_0g.slashed = Some(slashed.clone());
+        with_0g.bridge_requests = Some(bridge.clone());
+
+        let absent_slashed = core::mem::size_of::<Option<Withdrawals>>();
+        let absent_bridge = core::mem::size_of::<Option<Bytes>>();
+        assert_eq!(
+            with_0g.size(),
+            none.size() - absent_slashed - absent_bridge + slashed.total_size() + bridge.len()
+        );
     }
 }
