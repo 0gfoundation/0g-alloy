@@ -40,6 +40,11 @@ pub struct Block<T = Transaction<TxEnvelope>, H = Header> {
     /// Withdrawals in the block.
     #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
     pub withdrawals: Option<Withdrawals>,
+    /// 0G extension: consensus-layer slash entries of the block, in the withdrawal shape
+    /// (`index` = evidence height, `validatorIndex`, `address` = the slashed validator contract,
+    /// `amount` in gwei). Not part of the block hash. Omitted when empty, as 0g-geth does.
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub slashed: Option<Withdrawals>,
 }
 
 // cannot derive, as the derive impl would constrain `where T: Default`
@@ -50,6 +55,7 @@ impl<T, H: Default> Default for Block<T, H> {
             uncles: Default::default(),
             transactions: Default::default(),
             withdrawals: Default::default(),
+            slashed: Default::default(),
         }
     }
 }
@@ -75,7 +81,7 @@ impl<T, H> Block<T, H> {
     /// .with_withdrawals(Some(Withdrawals::default()));
     /// ```
     pub const fn new(header: H, transactions: BlockTransactions<T>) -> Self {
-        Self { header, uncles: vec![], transactions, withdrawals: None }
+        Self { header, uncles: vec![], transactions, withdrawals: None, slashed: None }
     }
 
     /// Returns the block's number.
@@ -103,6 +109,12 @@ impl<T, H> Block<T, H> {
     /// Sets the withdrawals for the block.
     pub fn with_withdrawals(mut self, withdrawals: Option<Withdrawals>) -> Self {
         self.withdrawals = withdrawals;
+        self
+    }
+
+    /// Sets the 0G slashed entries for the block.
+    pub fn with_slashed(mut self, slashed: Option<Withdrawals>) -> Self {
+        self.slashed = slashed;
         self
     }
 
@@ -150,7 +162,7 @@ impl<T, H> Block<T, H> {
             transactions: self.transactions.into_transactions_vec(),
             ommers: Default::default(),
             withdrawals: self.withdrawals,
-            slashed: None,
+            slashed: self.slashed,
             bridge_requests: None,
         }
     }
@@ -170,7 +182,7 @@ impl<T, H> Block<T, H> {
             transactions: self.transactions.into_transactions_vec(),
             ommers: vec![],
             withdrawals: self.withdrawals,
-            slashed: None,
+            slashed: self.slashed,
             bridge_requests: None,
         }
         .into_block(self.header)
@@ -183,6 +195,7 @@ impl<T, H> Block<T, H> {
             uncles: self.uncles,
             transactions: self.transactions,
             withdrawals: self.withdrawals,
+            slashed: self.slashed,
         }
     }
 
@@ -208,6 +221,7 @@ impl<T, H> Block<T, H> {
             uncles: self.uncles,
             transactions: self.transactions,
             withdrawals: self.withdrawals,
+            slashed: self.slashed,
         })
     }
 
@@ -238,6 +252,7 @@ impl<T, H> Block<T, H> {
             uncles: self.uncles,
             transactions: self.transactions.map(f),
             withdrawals: self.withdrawals,
+            slashed: self.slashed,
         }
     }
 
@@ -254,6 +269,7 @@ impl<T, H> Block<T, H> {
             uncles: self.uncles,
             transactions: self.transactions.try_map(f)?,
             withdrawals: self.withdrawals,
+            slashed: self.slashed,
         })
     }
 
@@ -288,6 +304,7 @@ impl<T, H: Sealable + Encodable> Block<T, Header<H>> {
             header: Header::from_consensus(block.header.seal_slow(), None, Some(size)),
             transactions: BlockTransactions::Uncle,
             withdrawals: None,
+            slashed: None,
         }
     }
 }
@@ -323,7 +340,7 @@ impl<T> Block<T> {
         let alloy_consensus::Block {
             header,
             body:
-                alloy_consensus::BlockBody { transactions, ommers, withdrawals, slashed: _, bridge_requests: _ },
+                alloy_consensus::BlockBody { transactions, ommers, withdrawals, slashed, bridge_requests: _ },
         } = block;
 
         Self {
@@ -331,6 +348,7 @@ impl<T> Block<T> {
             uncles: ommers.into_iter().map(|h| h.hash_slow()).collect(),
             transactions: BlockTransactions::Full(transactions),
             withdrawals,
+            slashed,
         }
     }
 
@@ -342,12 +360,12 @@ impl<T> Block<T> {
     ///  - If the block's transaction is not [`BlockTransactions::Full`], the returned block will
     ///    have an empty transaction vec.
     pub fn into_consensus(self) -> alloy_consensus::Block<T> {
-        let Self { header, transactions, withdrawals, .. } = self;
+        let Self { header, transactions, withdrawals, slashed, .. } = self;
         alloy_consensus::BlockBody {
             transactions: transactions.into_transactions_vec(),
             ommers: vec![],
             withdrawals,
-            slashed: None,
+            slashed,
             bridge_requests: None,
         }
         .into_block(header.into_consensus())
@@ -865,6 +883,7 @@ mod tests {
             uncles: vec![B256::with_last_byte(17)],
             transactions: vec![B256::with_last_byte(18)].into(),
             withdrawals: Some(Default::default()),
+            slashed: None,
         };
         let serialized = serde_json::to_string(&block).unwrap();
         similar_asserts::assert_eq!(
@@ -912,6 +931,7 @@ mod tests {
             uncles: vec![],
             transactions: BlockTransactions::Uncle,
             withdrawals: None,
+            slashed: None,
         };
         let serialized = serde_json::to_string(&block).unwrap();
         assert_eq!(
@@ -957,6 +977,7 @@ mod tests {
             uncles: vec![B256::with_last_byte(17)],
             transactions: vec![B256::with_last_byte(18)].into(),
             withdrawals: None,
+            slashed: None,
         };
         let serialized = serde_json::to_string(&block).unwrap();
         assert_eq!(
@@ -1325,6 +1346,7 @@ mod tests {
                 uncles: vec![],
                 transactions: BlockTransactions::Uncle,
                 withdrawals: None,
+                slashed: None,
             }
         );
     }
@@ -1366,6 +1388,7 @@ mod tests {
             uncles: vec![B256::with_last_byte(17)],
             transactions: vec![B256::with_last_byte(18)].into(),
             withdrawals: Some(Default::default()),
+            slashed: None,
         };
         let hash = block.header.hash;
         let rlp = Bytes::from("header");
@@ -1389,4 +1412,43 @@ mod tests {
         let s = include_str!("../testdata/tenderly.sepolia.json");
         let _block: Block = serde_json::from_str(s).unwrap();
     }
+
+    #[test]
+    #[cfg(feature = "serde")]
+    fn serde_block_slashed() {
+        use alloy_eips::eip4895::Withdrawal;
+        let entry = Withdrawal { index: 100, validator_index: 42, address: Address::with_last_byte(7), amount: 1_000_000_000 };
+        let block = Block::<B256>::default().with_slashed(Some(Withdrawals::new(vec![entry])));
+        let json = serde_json::to_value(&block).unwrap();
+        assert_eq!(
+            json["slashed"],
+            serde_json::json!([{"index": "0x64", "validatorIndex": "0x2a", "address": "0x0000000000000000000000000000000000000007", "amount": "0x3b9aca00"}])
+        );
+        let back: Block<B256> = serde_json::from_value(json).unwrap();
+        assert_eq!(back.slashed, block.slashed);
+
+        // empty is omitted, as 0g-geth does
+        let none = serde_json::to_value(Block::<B256>::default()).unwrap();
+        assert!(none.get("slashed").is_none());
+    }
+
+    #[test]
+    fn from_consensus_keeps_slashed() {
+        use alloy_eips::eip4895::Withdrawal;
+        let entry = Withdrawal { index: 1, validator_index: 2, address: Address::with_last_byte(3), amount: 4 };
+        let consensus = alloy_consensus::Block::<TxEnvelope>::new(
+            alloy_consensus::Header::default(),
+            alloy_consensus::BlockBody {
+                transactions: vec![],
+                ommers: vec![],
+                withdrawals: None,
+                slashed: Some(Withdrawals::new(vec![entry])),
+                bridge_requests: None,
+            },
+        );
+        let rpc = Block::from_consensus(consensus, None);
+        assert_eq!(rpc.slashed.as_ref().map(|s| s.len()), Some(1));
+        assert_eq!(rpc.into_consensus().body.slashed.map(|s| s.len()), Some(1));
+    }
+
 }
