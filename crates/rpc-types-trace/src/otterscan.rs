@@ -178,7 +178,7 @@ where
             transaction_count: usize,
         }
 
-        let Self { block: Block { header, uncles, transactions, withdrawals }, transaction_count } =
+        let Self { block: Block { header, uncles, transactions, withdrawals, .. }, transaction_count } =
             self;
 
         let helper = OtsBlockHelper {
